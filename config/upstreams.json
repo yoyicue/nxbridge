@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-11-02",
+  "lock_status": "research_snapshot_not_build_lock",
+  "components": [
+    {
+      "id": "nxnative",
+      "repository": "https://github.com/seedds/nxnative",
+      "reference": "main",
+      "revision": "ba366d26a24d5018cd095947187314e8526e0ca4",
+      "license_label": "MIT",
+      "validation": "not_built_here",
+      "constraints": [
+        "Default documented toolchain: macOS >=26.6, Xcode 27.2",
+        "BOTW local M4 benchmark pending",
+        "Occlusion / minimize behavior requires multi-instance adaptation"
+      ]
+    },
+    {
+      "id": "nx2apple",
+      "repository": "https://github.com/LNPANDY/NX2Apple",
+      "reference": "v1.0.0",
+      "revision": "5259f705a75d1186d8b3bc50dbc39a6f510af3b6",
+      "license_label": "MIT",
+      "validation": "not_built_here",
+      "constraints": [
+        "Its bundled engine is a separate revision; resolve it before building",
+        "Do not assume the launcher isolates per-player storage"
+      ]
+    },
+    {
+      "id": "sunshine",
+      "repository": "https://github.com/LizardByte/Sunshine",
+      "reference": "v2026.914.233613",
+      "revision": "63d35f702ee9e362e43263742981836ec0710384",
+      "license_label": "GPL-3.0",
+      "validation": "not_installed_here",
+      "constraints": [
+        "Reference release does not support macOS gamepads",
+        "Independent per-game media sessions need a spike / adaptation",
+        "Newer licensed Broker is outside the preferred open-source input path"
+      ]
+    },
+    {
+      "id": "moonshine",
+      "repository": "https://github.com/hgaiser/moonshine",
+      "reference": "main (research snapshot, Cargo 0.16.1)",
+      "revision": "79554f853135cbac44502b58093a4eb0f0f5e6f1",
+      "license_label": "BSD-2-Clause",
+      "validation": "source_review_only_not_built_on_macos",
+      "constraints": [
+        "Rust GameStream server reference; protocol reuse scope requires an audit",
+        "Linux only; systemd, compositor, audio and Vulkan encoding dependencies need separation",
+        "Metal / IOSurface / VideoToolbox and nxnative frame / PCM integration are not implemented here",
+        "No Moonlight compatibility, memory reduction or multi-session capacity has been measured on this Mac"
+      ]
+    },
+    {
+      "id": "moonlight-android",
+      "repository": "https://github.com/moonlight-stream/moonlight-android",
+      "reference": "master",
+      "revision": "b48494cb96bff23d8886c4775cc4f39a1075495d",
+      "license_label": "GPL-3.0",
+      "validation": "not_installed_here",
+      "constraints": [
+        "Non-default worker ports, discovery and pairing need validation",
+        "Hardware decoder availability is not a measured latency result"
+      ]
+    }
+  ]
+}

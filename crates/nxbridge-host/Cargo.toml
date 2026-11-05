@@ -1,0 +1,11 @@
+[package]
+name = "nxbridge-host"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"

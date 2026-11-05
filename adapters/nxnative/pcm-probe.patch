@@ -1,0 +1,28 @@
+diff --git a/dm/host/hle_audio.c b/dm/host/hle_audio.c
+index 0483c14..2322984 100644
+--- a/dm/host/hle_audio.c
++++ b/dm/host/hle_audio.c
+@@ -245,18 +245,21 @@ static void au_open(aout *a) {
+ }
+ // Silent sink: consumes in real time at 48 kHz every 5 ms. When more than 100 ms behind (iOS suspended the whole process in the background, SIGSTOP on the Mac), restart the count from now and do not make up the missed time --
+ // making it up would pull hundreds of times in one go (seconds' worth), releasing all of the game's buffers and logging hundreds of underruns; a suspended console does not play that stretch either
++void nxb_pcm_probe_start(void);
++void nxb_pcm_probe_push(const int16_t *, uint32_t);
+ static void *null_sink(void *p) {
+-    aout *a = p; uint8_t scratch[RATE / 200 * 2 * 8]; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // paces the game's audio in real time
++    aout *a = p; _Alignas(int16_t) uint8_t scratch[RATE / 200 * 2 * 8]; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // paces the game's audio in real time
+     uint64_t bytes = (uint64_t)RATE / 200 * 2 * a->ch, t = now_ns();
+     while (atomic_load_explicit(&a->null_run, memory_order_acquire)) {
+         t += 5000000; uint64_t now = now_ns();
+         if (t > now) usleep((useconds_t)((t - now) / 1000)); else if (now - t > 100000000) t = now;
+         pull(a, scratch, bytes);
++        if (a->id == 0 && a->ch == 2) nxb_pcm_probe_push((const int16_t *)scratch, RATE / 200);
+     }
+     return NULL;
+ }
+ // Backend changes; callers hold g_aos_lock. pull() takes no lock, so joining a sink under it cannot deadlock
+-static void null_start(aout *a) { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
++static void null_start(aout *a) { if (a->id == 0 && a->ch == 2) nxb_pcm_probe_start(); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
+ static void null_stop(aout *a) { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); a->backend = BK_NONE; }
+ static void backend_stop(aout *a) {
+     if (a->backend == BK_AU) { AudioOutputUnitStop(a->au); a->backend = BK_NONE; }

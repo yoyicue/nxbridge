@@ -1,0 +1,50 @@
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 4ccb061..c7ad83a 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -2,6 +2,7 @@
+ #import <Metal/Metal.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <QuartzCore/CAMetalDisplayLink.h>
++#import "nxbridge_video_probe.h"
+ #import <MetalFX/MetalFX.h>
+ #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
+ #import <ImageIO/ImageIO.h>
+@@ -11418,6 +11419,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink
+     // (headless runs never present, and every game before drew into a window texture before presenting it). A commit with nothing new costs nothing
+     res_commit();
++    if (!front_metal_layer()) {
++        nxb_probe_ticket capture;
++        id<MTLTexture> out = nxb_video_probe_claim(g_dev, period, &capture);
++        if (out && !present_offscreen_m4(src, crop, out, ^(int ok) { nxb_video_probe_complete(capture, ok != 0); }))
++            nxb_video_probe_complete(capture, 0);
++    }
+     // DM_NVN_REGLUM=x0,y0,x1,y1:file (normalized coordinates): read back this region on every present and record "present sequence number, present time ns, region mean luminance, subsampled grayscale thumbnail (hex)" (diagnostic: verify that animation speed is independent of frame rate).
+     // A separate command buffer is queued after this frame's rendering (the same queue executes in submit order); does not wait for the GPU and does not disturb frame pacing
+     static int rl = -1; static float rr[4]; static FILE *rlf; static pthread_mutex_t rlmu = PTHREAD_MUTEX_INITIALIZER;
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index 978fee0..83e99b6 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -64,7 +64,7 @@ endif
+ .PHONY: FORCE
+ FORCE:
+ dmhost: $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(MSL_H)
+-	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
++	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface -framework ImageIO -framework UniformTypeIdentifiers
+ clean:   # the host and everything make generates for it (gen/: the profile headers, the game stamp and the libvpx build; dmhost_* and *.dSYM beside them, as in .gitignore)
+ 	rm -rf gen dmhost dmhost_* *.dSYM
+ .PHONY: clean
+diff --git a/dm/host/hle_lifecycle.c b/dm/host/hle_lifecycle.c
+index e027970..cf3d284 100644
+--- a/dm/host/hle_lifecycle.c
++++ b/dm/host/hle_lifecycle.c
+@@ -17,6 +17,7 @@ void dm_host_shutdown(const char *why) {
+     dm_cheats_exit();                               // a clean exit: no safe mode for the cheats at the next launch (atexit does not run either)
+     dm_audio_suspend(1);
+     dm_gfx_suspend(1);
++    { void nxb_video_probe_shutdown(void); nxb_video_probe_shutdown(); }
+     LOG("graceful exit done (%.3f s)", (now_ns() - t0) / 1e9);
+     _exit(0);
+ }

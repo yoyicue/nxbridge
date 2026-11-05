@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "status": "experimental_locally_validated_not_upstream_supported",
+  "nx2apple_commit": "41f7d6ba920927856316f6e04af1c50e437eb9c3",
+  "nxnative_base_commit": "bbc3b73784751d2a706932dc69fd67627e3445d4",
+  "nxnative_patched_commit": "b8d16169c5fb7a3c6a936a950e294b1df4680551",
+  "build_script_patch_sha256": "2886a08c27b5e2c78f19702b12b51285b0be89a3b09046f8a0a561321f6978dd",
+  "macos": "26.5 (25F71)",
+  "xcode": "26.5 (17F42)",
+  "metal_compiler": "32023.883",
+  "engine_expected_metal_compiler": "32023.921",
+  "dotnet_sdk": "10.0.107",
+  "host_sha256": "bf69c4f475b6c71ad161fce9b0be0b5fb033fb1d3750fea1eb8f2572f31085be",
+  "shader_metadata_sha256": {
+    "c1_full.tsv": "2af8b42701227fe3b425076a6bb337d86d8617b7af1b7bf216c61f8262a06817",
+    "cb_extent.tsv": "4c2bb798d56aa69ce62cbacb836091ad72319b3119a2a9bb584cdd744a346787"
+  },
+  "constraints": [
+    "Compiler mismatch requires --allow-other-metal; rendering correctness is not universally established.",
+    "Isolated run validated title menu, saved-game list and save transaction, not gameplay performance or actual loading into the world.",
+    "Assets, generated metadata, local build and private saves are outside version control."
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "run_id": null,
+  "task_id": null,
+  "result": "not_run",
+  "started_at": null,
+  "hypothesis": null,
+  "host": {
+    "model": null,
+    "memory_gib": null,
+    "os": null,
+    "toolchain": null
+  },
+  "builds": {
+    "nxnative_revision": null,
+    "nx2apple_engine_revision": null,
+    "sunshine_revision": null,
+    "moonlight_revision": null,
+    "game_version": null
+  },
+  "network": {
+    "host_link": null,
+    "client_link": null,
+    "notes": null
+  },
+  "stream": {
+    "width": null,
+    "height": null,
+    "fps": null,
+    "codec": null,
+    "bitrate_mbps": null
+  },
+  "concurrent_sessions": null,
+  "sessions": [
+    {
+      "session_alias": null,
+      "client_alias": null,
+      "scene": null,
+      "save_snapshot_hash": null,
+      "warmup_seconds": null,
+      "sample_seconds": null,
+      "valid_sample": null,
+      "invalid_reason": null,
+      "metrics": {
+        "game_mean_fps": null,
+        "game_interval_p50_ms": null,
+        "game_interval_p95_ms": null,
+        "game_interval_p99_ms": null,
+        "game_speed_ratio": null,
+        "gpu_p95_ms": null,
+        "encode_p95_ms": null,
+        "decode_p95_ms": null,
+        "stream_present_fps": null,
+        "stream_drop_percent": null,
+        "input_to_photon_p50_ms": null,
+        "input_to_photon_p95_ms": null
+      },
+      "latency_method": {
+        "method": null,
+        "sample_count": null,
+        "clock_domain": null,
+        "uncertainty_ms": null
+      },
+      "raw_files": []
+    }
+  ],
+  "system": {
+    "memory_pressure": null,
+    "swap_growth_bytes": null,
+    "thermal_notes": null
+  },
+  "isolation": {
+    "save": null,
+    "video": null,
+    "audio": null,
+    "input": null,
+    "disconnect_release": null
+  },
+  "exclusions": [],
+  "temporary_changes": [],
+  "restoration": null,
+  "conclusion": null
+}

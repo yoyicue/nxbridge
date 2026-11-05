@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "example_not_consumed_by_runtime",
+  "host_alias": "family-mac",
+  "storage_root": "/ABSOLUTE/PATH/TO/NXBridgeData",
+  "adb_serial": null,
+  "runtime": {
+    "nxnative_build_dir": null,
+    "game_library_root": null,
+    "title_id": "01007EF00011E000",
+    "fps_target": 30
+  },
+  "sessions": {
+    "target_concurrent_players": 3,
+    "initial_session_limit": 1,
+    "measured_session_capacity": null,
+    "reconnect_grace_seconds": 60
+  },
+  "stream": {
+    "codec": "h264",
+    "width": 1280,
+    "height": 720,
+    "fps": 60,
+    "bitrate_mbps": 12,
+    "hdr": false
+  },
+  "input": {
+    "release_timeout_ms": 250
+  },
+  "profiles": [
+    {
+      "id": "player-1",
+      "label": "玩家 1"
+    },
+    {
+      "id": "player-2",
+      "label": "玩家 2"
+    },
+    {
+      "id": "player-3",
+      "label": "玩家 3"
+    }
+  ]
+}

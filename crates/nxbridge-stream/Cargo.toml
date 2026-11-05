@@ -1,0 +1,9 @@
+[package]
+name = "nxbridge-stream"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+nxbridge-media = { path = "../nxbridge-media" }

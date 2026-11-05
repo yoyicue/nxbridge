@@ -1,0 +1,1076 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-05",
+  "execution_policy": "single_active_agent_by_default",
+  "tasks": [
+    {
+      "id": "NXB-000",
+      "title": "建立 agent 驱动的设计与项目约定",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [],
+      "scope": [
+        "README.md",
+        "AGENTS.md",
+        "docs/",
+        "config/",
+        "tasks/",
+        "templates/",
+        "scripts/"
+      ],
+      "acceptance": [
+        "设计覆盖单会话、多玩家隔离、Lima 决策和未验证约束",
+        "make check 通过；只读 preflight 可执行",
+        "无串流 / 性能结果被虚构为已完成"
+      ],
+      "evidence": [
+        "docs/reports/NXB-000.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-005",
+      "title": "更新 Rust 原生服务端与离屏输出设计",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-000"
+      ],
+      "scope": [
+        "README.md",
+        "AGENTS.md",
+        "docs/",
+        "config/upstreams.json",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "明确 Rust GameStream 服务端、nxnative 引擎、Moonlight 客户端与 Sunshine 基线的边界",
+        "区分无游戏窗口、无物理显示器、锁屏和未登录的目标与验证状态",
+        "记录 Moonshine 调研修订、Mac 适配缺口、实施依赖和验收门槛",
+        "make check 通过，保留已有输入原型与实验结果"
+      ],
+      "evidence": [
+        "docs/reports/NXB-005.md",
+        "docs/game-session-server.md",
+        "docs/decisions/0002-rust-offscreen-server.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-006",
+      "title": "建立 Rust 工作空间与适配目录边界",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-005"
+      ],
+      "scope": [
+        "Cargo.toml",
+        "crates/",
+        "adapters/nxnative/",
+        "docs/"
+      ],
+      "acceptance": [
+        "创建可离线检查的 Rust workspace，划分 host 与 stream 的源码落点",
+        "为 nxnative 离屏适配预留目录，保留既有输入与运行环境",
+        "文档明确骨架不代表协议、离屏或服务能力已实现",
+        "make check 与 workspace 基础构建检查通过"
+      ],
+      "evidence": [
+        "docs/reports/NXB-006.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-007",
+      "title": "固定 Web 管理与多游戏产品化设计",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-005",
+        "NXB-006"
+      ],
+      "scope": [
+        "docs/",
+        "README.md",
+        "AGENTS.md",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "明确 Web 管理、Moonlight 游玩和 Web / CLI / agent 共用 Host API 的职责",
+        "定义游戏构建、输入配置、存档版本兼容和逐游戏能力 / 混合并发验收",
+        "拆分最小管理入口、家庭流程与第二款游戏验证，保持现有媒体主线前置条件",
+        "make check 通过，设计与尚未实现的功能明确区分"
+      ],
+      "evidence": [
+        "docs/web-management-and-game-library.md",
+        "docs/reports/NXB-007.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-010",
+      "title": "固定环境、构建版本与实验资产",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-000"
+      ],
+      "scope": [
+        "host environment",
+        "upstream compatibility",
+        "test assets"
+      ],
+      "acceptance": [
+        "记录主机 / 客户端环境与明确设备选择",
+        "选定互相兼容的 nxnative / NX2Apple engine / 工具链，解释与研究快照的差异",
+        "准备仓库外 APFS 测试存档副本及只读资源，确认启动环境实际生效"
+      ],
+      "evidence": [
+        "docs/reports/NXB-010.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-020",
+      "title": "建立 Mac 本机 BOTW 性能基线",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-010"
+      ],
+      "scope": [
+        "runtime benchmark"
+      ],
+      "acceptance": [
+        "固定存档的神庙与户外路线各有三次 10 分钟样本",
+        "分别报告 FPS、帧间隔、游戏速度和冷编译卡顿",
+        "没有测量数据时不登记支持 30 FPS"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-030",
+      "title": "建立 Sunshine 单会话音视频对照基线",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-010"
+      ],
+      "scope": [
+        "Sunshine",
+        "Moonlight",
+        "media evidence"
+      ],
+      "acceptance": [
+        "记录实际编码器 / 解码器、画质参数及采样方法",
+        "视频、声音、配对和正常退出可复现",
+        "测量媒体链路；明确是否只是桌面基线以及端到端延迟缺项"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-031",
+      "title": "固定合成源与游戏源共用媒体 ABI",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-006"
+      ],
+      "scope": [
+        "crates/nxbridge-media/",
+        "adapters/nxnative/",
+        "docs/",
+        "tests/"
+      ],
+      "acceptance": [
+        "定义固定版本的跨语言媒体描述、会话 / 运行代次与单调时间戳单位",
+        "规定 GPU 完成、编码释放、缓冲注册与会话终止规则",
+        "明确视频和音频队列 / 在途上限及溢出处理",
+        "验证 C 与 Rust 的布局、参数范围和代次 / 缓冲生命周期，不把接口写成已完成离屏实现"
+      ],
+      "evidence": [
+        "docs/reports/NXB-031.md",
+        "docs/media-abi-v1.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-032",
+      "title": "验证 Rust GameStream 服务端的 Mac 合成音画原型",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-005",
+        "NXB-031"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "crates/nxbridge-media/",
+        "crates/nxbridge-stream/",
+        "adapters/",
+        "tests/",
+        "protocol research",
+        "crates/nxbridge-gamestream/",
+        "vendor/moonshine-core/"
+      ],
+      "acceptance": [
+        "固定 Moonshine 修订，记录许可、可复用协议模块、Linux 耦合及 Mac 平台适配范围",
+        "Mac 离屏测试帧和 PCM 通过 NXBridge 到真实 Moonlight，无 Sunshine 参与；记录实际 VideoToolbox 编码器和客户端硬解码器",
+        "验证发现或手动添加、配对证书、能力与 RTSP 协商、媒体分包 / 纠错 / 所选加密模式、关键帧请求和输入事件",
+        "记录断线与恢复、序号和缓冲上限，不把测试音画当作游戏或多实例性能证明"
+      ],
+      "evidence": [
+        "docs/reports/NXB-032.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-035",
+      "title": "验证 nxnative 离屏帧与 PCM 输出",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-005",
+        "NXB-010",
+        "NXB-031"
+      ],
+      "scope": [
+        "adapters/nxnative/",
+        "crates/nxbridge-media/",
+        "runtime frame and audio output",
+        "tests/"
+      ],
+      "acceptance": [
+        "固定引擎和补丁，已登录用户会话内无可见游戏窗口、无屏幕采集地输出真实游戏帧与 PCM",
+        "共享纹理 / CVPixelBuffer 的 GPU 完成、编码释放、运行代次和缓冲容量有可验证契约",
+        "替代窗口呈现和物理音频回调时保持游戏速度、帧节奏、音频消费与音画同步",
+        "慢消费者、源退出和重新启动不造成错误复用、旧帧串入或无限积压；无显示器和未登录能力不由此推导"
+      ],
+      "evidence": [
+        "docs/reports/NXB-035.md",
+        "docs/reports/NXB-single-pad-20261104.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-036",
+      "title": "实现本机只读管理台与服务状态原型",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-007",
+        "NXB-032"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "web/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "提供仅绑定本机回环地址的版本化只读 API 与随程序分发的网页，不提供未经验收的启动、存档、配对或账号操作",
+        "对显式配置的本机 GameStream 端点读取真实状态；离线、错误和未测容量、性能均显示为未知，不能将多个 worker 冒充完整会话管理",
+        "校验请求边界并限制并发、超时和响应大小；无设备覆盖真实 HTTP 端点、离线状态和网页数据展示",
+        "make check、Rust 检查与必要的无设备验证通过，记录实验限制和恢复方式"
+      ],
+      "evidence": [
+        "docs/reports/NXB-036.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-037",
+      "title": "接通单会话 Rust 原生游戏串流与 LAN 输入",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-020",
+        "NXB-030",
+        "NXB-032",
+        "NXB-035",
+        "NXB-045"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "crates/nxbridge-media/",
+        "crates/nxbridge-stream/",
+        "adapters/",
+        "Moonlight client extensions (if required)",
+        "tests/"
+      ],
+      "acceptance": [
+        "真实 BOTW 通过 NXBridge 原生媒体后端到 Moonlight，运行不依赖 Sunshine、NX2Apple GUI 或游戏窗口采集",
+        "复用输入原型的映射和采样接口，经认证 LAN 会话传输按键 / 双摇杆并验证断线释放，无 ADB 隧道依赖",
+        "平板声音有实际确认，游戏速度、帧时间、input-to-photon 与重连按 validation 记录",
+        "与 Sunshine 基线在固定构建 / 场景 / 参数下比较，报告差异、各进程内存及限制，不因改用 Rust 宣称性能提升"
+      ],
+      "evidence": [
+        "docs/reports/NXB-single-pad-20261104.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-038",
+      "title": "实现统一管理 API 与最小 Web 管理入口",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-007",
+        "NXB-037"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "web/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "固定版本化机器可读管理 API，Web / CLI / agent 共用身份校验、状态和异步操作结果",
+        "内置静态网页支持管理员建立、真实 Moonlight 配对、BOTW 构建登记、单会话启动 / 正常退出、状态与诊断",
+        "完成 web-management-and-game-library 的 WEB-01 至 WEB-04 在单会话范围内的验收，覆盖幂等重试、存档锁、旧代次、页面关闭和管理负载",
+        "以两个不同配置完成 GAME-01，游戏构建、预设和输入配置不硬编码 BOTW；夹具不作为第二款游戏兼容证据",
+        "尚未完成的多玩家排队与恢复能力明确关闭，保存成功与正常退出分别报告"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-039",
+      "title": "实现本机只读游戏库与构建能力展示",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-007",
+        "NXB-036"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "web/",
+        "config/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "从显式指定的本机配置读取版本化游戏与构建元数据，限制数据大小并校验标识、重复项和能力状态，不读取游戏或存档",
+        "统一只读 API 和管理页面显示多个游戏及其各自构建、版本和能力，不提供启动、配对、存档写入或局域网管理",
+        "使用两套虚构游戏配置验证隔离、空状态和错误；真实 BOTW 仅以实验配置展示，未经测量功能保持未知",
+        "完成无设备测试、make check、Rust 检查及真实浏览器检查，记录已知限制"
+      ],
+      "evidence": [
+        "docs/reports/NXB-039.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-040",
+      "title": "验证原生双实例的隔离可行性",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-010",
+        "NXB-037"
+      ],
+      "scope": [
+        "runtime launching",
+        "native media sessions",
+        "sessions"
+      ],
+      "acceptance": [
+        "两份不同测试存档独立写入且重复写者被拒绝",
+        "两路原生离屏帧 / PCM / 输入分别绑定游戏进程与运行代次，采用不同标记验证没有串线",
+        "验证 Host 身份、worker 完整媒体 / 控制端点、配对 / 发现 / 客户端当前游戏状态兼容；需要虚拟主机身份时记录依据",
+        "窗口过渡结果与原生结果分别记录；输出实际可行方案或阻碍，禁止把失败原型标成已支持多实例"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-041",
+      "title": "实现本机游戏库登记与构建资源绑定",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-007",
+        "NXB-039"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "web/",
+        "config/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "在本机管理台和同一版本化 API 中登记游戏、不可变构建并绑定已有构建目录，支持修改游戏名称",
+        "修改只写本机游戏库元数据；受限校验、重复请求安全和并发版本冲突明确，绝不删除游戏文件或存档",
+        "保留并迁移已有 BOTW 元数据；实际目录可读与游戏兼容验收分开显示",
+        "通过无设备的持久化、并发和请求来源测试、真实浏览器验证、make check 与 Rust 检查"
+      ],
+      "evidence": [
+        "docs/reports/NXB-041.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-045",
+      "title": "验证 Switch 触屏输入的单会话原型",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-000"
+      ],
+      "scope": [
+        "adapters/",
+        "Moonlight client extensions (if required)",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "Pad 触屏提供 Switch 常用按钮、双摇杆并可多点同时操作",
+        "输入直接绑定单一游戏进程，不依赖全局键鼠或焦点",
+        "短按、摇杆、释放和断线中和有验证",
+        "在平板到真实游戏的链路上验证；未验证的体感和延迟明确标注"
+      ],
+      "evidence": [
+        "docs/reports/NXB-045.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-047",
+      "title": "通过 Sunshine 原生手柄协议接入游戏会话",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-045"
+      ],
+      "scope": [
+        "adapters/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "Moonlight 触屏通过原生 Sunshine 手柄协议传输，由 Sunshine 会话直接路由到目标游戏进程",
+        "无需 USB ADB 转发或独立局域网输入协议；短按、组合、双摇杆、断线释放经过验证",
+        "保持上游版本固定、按会话隔离、保留用户原有工作副本",
+        "构建和真实平板到游戏验证结果及限制有记录"
+      ],
+      "evidence": [
+        "docs/reports/NXB-047.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-048",
+      "title": "编写输入桥动作宏迭代需求",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-006",
+        "NXB-047"
+      ],
+      "scope": [
+        "docs/input-bridge-requirements.md",
+        "docs/",
+        "README.md",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "定义 BOTW 五个首版动作键，区分固定输入序列与自动完美操作",
+        "明确 GameStream 触发、组合采样、人工接管、会话归属和断线释放",
+        "提供可执行验收矩阵与实施拆分，保留现有媒体任务和依赖",
+        "make check 通过，未实现或未测量的能力明确标注"
+      ],
+      "evidence": [
+        "docs/input-bridge-requirements.md",
+        "docs/reports/NXB-048.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-050",
+      "title": "实现按会话路由的低延迟输入桥",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-020",
+        "NXB-030",
+        "NXB-040"
+      ],
+      "scope": [
+        "adapters/",
+        "tests/"
+      ],
+      "acceptance": [
+        "复用单路原型，在 Rust GameStream 接收端与运行时之间验证双摇杆、短按 / 长按和范围检查",
+        "旧连接 / 代次、断线、窗口焦点变化不导致串线或卡键",
+        "绑定游戏实际采样与主机阶段指标；不使用 100 ms DM_CTL 轮询充当正式输入"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-051",
+      "title": "实现动作宏的采样调度与输入仲裁原型",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-048"
+      ],
+      "scope": [
+        "adapters/input/",
+        "crates/nxbridge-host/",
+        "crates/nxbridge-stream/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "按 input-bridge-requirements 明确有效采样周期、有限配置、输入来源所有权和五个动作的状态机",
+        "按键与轴以一致快照发布，同键重复按下保留释放采样，人工接管与取消不恢复旧状态",
+        "离线完成 AC-01 至 AC-04，包括至少 1000 次确定性执行、停顿、过期、重复触发和有界资源测试",
+        "记录剩余真实运行时校准项，不把伪采样器通过当作游戏动作或性能验收"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-052",
+      "title": "接通 BOTW 五个动作键与单会话宏输入",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-051",
+        "NXB-037"
+      ],
+      "scope": [
+        "adapters/input/",
+        "crates/nxbridge-host/",
+        "crates/nxbridge-stream/",
+        "Moonlight client extensions (if required)",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "固定真实 GameStream 触发绑定、去重和取消行为；专用触发不泄漏为普通游戏输入，不新增独立 LAN 输入服务",
+        "Pad 五个动作键与真实 BOTW 接通，按版本校准键位、轴方向和时序，区分序列结束与实际动作结果",
+        "完成 input-bridge-requirements 的真实采样适配及 AC-05 至 AC-07，保留失败与误超时证据",
+        "验证人工接管、断线中和、普通输入回归和外部延迟，不宣称自动完美盾反或自动林克时间"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-053",
+      "title": "验证动作宏的多会话隔离与生命周期",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-052",
+        "NXB-050",
+        "NXB-060"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "crates/nxbridge-stream/",
+        "adapters/input/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "完成 input-bridge-requirements 的 AC-08，模拟路由测试与真实双会话证据分别记录",
+        "A 的触发、取消、配置变化、控制权转移与重连不改变 B 的输入或活动宏",
+        "旧运行代次与控制代次的动作不能进入新会话，故障释放只作用于对应来源",
+        "记录普通输入与生命周期回归；不以功能隔离通过代替 NXB-070 的承载容量验收"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-060",
+      "title": "实现会话生命周期与玩家存档管理",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-040",
+        "NXB-050"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "crates/nxbridge-media/",
+        "crates/nxbridge-stream/",
+        "adapters/",
+        "tests/"
+      ],
+      "acceptance": [
+        "启动回滚、独占存档锁、退出 / 宽限重连和归属恢复可验证",
+        "视频 / 音频只到对应玩家，不按全局桌面或系统混音广播",
+        "故障注入只影响目标测试会话，其他会话不被结束"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-065",
+      "title": "验证原生服务的显示器与登录状态支持矩阵",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-037",
+        "NXB-060"
+      ],
+      "scope": [
+        "host lifecycle",
+        "offscreen validation",
+        "docs/"
+      ],
+      "acceptance": [
+        "首个原生版本在已登录用户会话中无游戏窗口运行，并证实帧源为运行时直接输出",
+        "分别记录无物理显示器冷启动 / 热拔插、锁屏、未登录或用户退出登录的 supported / unsupported / unknown 与证据",
+        "报告虚拟显示设备、WindowServer、启动方式和音频设备依赖；不以隐藏窗口或保持网络连接作为通过证据",
+        "明确生产接纳条件和不支持状态下的行为，未测条件不宣传为可用，不要求所有后续能力在首版达成"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-070",
+      "title": "验证 1 / 2 / 3 路承载容量与延迟",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-020",
+        "NXB-030",
+        "NXB-050",
+        "NXB-060",
+        "NXB-065"
+      ],
+      "scope": [
+        "benchmarks",
+        "capacity policy"
+      ],
+      "acceptance": [
+        "按 validation 规程从一路逐步增加并发",
+        "每路独立报告性能、内存压力、编码、网络、输入到画面延迟",
+        "只有达到各路门槛的数量才登记为 measured_session_capacity；失败保留证据与排队上限"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-080",
+      "title": "完成家庭玩家入口与断线恢复体验",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-038",
+        "NXB-060",
+        "NXB-070"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "web/",
+        "Moonlight client extensions (if required)",
+        "tests/"
+      ],
+      "acceptance": [
+        "玩家档案、游戏选择、排队 / 取消和明确退出流程可用",
+        "重连恢复到同一档案和会话，不重复创建写者",
+        "30 分钟稳定性与 20 次重连测试有记录",
+        "完成 Web 管理与玩家入口的权限、构建选择、排队与恢复流程，并将 WEB-01 至 WEB-04 扩展到多玩家",
+        "验证玩家入口到 Moonlight 的目标会话选择与恢复；自动唤起未通过时提供明确手动步骤，不声称一键接入"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-081",
+      "title": "验证第二款游戏接入与混合游戏会话",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-007",
+        "NXB-038",
+        "NXB-060",
+        "NXB-070"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "adapters/",
+        "web/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "选择具有本地可用构建的第二款游戏，记录引擎 / 游戏 / 适配版本并通过配置进入游戏库；不作为 BOTW 首版前置条件",
+        "完成 web-management-and-game-library 的 GAME-02，逐项验证真实离屏音画、输入、保存加载、退出与重连",
+        "验证专属动作、存档和构建升级兼容隔离，不把 BOTW 宏或其他版本能力自动应用到新游戏",
+        "按 GAME-03 分别测量单路和混合游戏并发，逐路报告指标及该组合容量；失败和未知能力保留证据"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-090",
+      "title": "验证体感与震动扩展",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-050"
+      ],
+      "scope": [
+        "adapters/",
+        "Moonlight client extensions (if required)",
+        "tests/"
+      ],
+      "acceptance": [
+        "体感坐标系、单位和数据新鲜度明确",
+        "BOTW 体感玩法单独测试，震动返回目标客户端",
+        "能力不支持时正确显示，不影响基础输入"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-100",
+      "title": "完善稳定版构建、部署与发布约定",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-080",
+        "NXB-102",
+        "NXB-103",
+        "NXB-104"
+      ],
+      "scope": [
+        "build instructions",
+        "distribution metadata"
+      ],
+      "acceptance": [
+        "完成安装、升级、回滚和部署的可复现说明",
+        "补齐长期维护的版本元数据、发布与兼容策略",
+        "公开内容中不含游戏、密钥、存档、凭据和私人路径"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-101",
+      "title": "整理许可证、上游来源与公开前检查",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-006"
+      ],
+      "scope": [
+        "docs/",
+        "vendor/",
+        "scripts/",
+        "tests/"
+      ],
+      "acceptance": [
+        "固定直接引入与运行依赖的来源、修订、许可证和不确定范围，记录自有代码许可的选择状态",
+        "记录 GPL 组合与客户端、编解码器的分发边界，不以根许可证覆盖第三方",
+        "建立公开候选内容的敏感路径和禁止文件检查，验证阻断及误报处理",
+        "make check 通过，记录尚未完成的依赖和法务核查"
+      ],
+      "evidence": [
+        "docs/reports/NXB-101.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-102",
+      "title": "建立无游戏资源的干净构建与合成自检",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-006",
+        "NXB-031",
+        "NXB-032"
+      ],
+      "scope": [
+        "crates/",
+        "scripts/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "提供明确的 Rust、macOS 和原生依赖要求以及锁文件构建入口",
+        "从隔离源码树完成构建并执行不含私人数据的合成音画验证，标明依赖缓存和硬件条件",
+        "记录首次安装、启动、排障和已知不可复现项，不把缓存环境冒充干净 Mac"
+      ],
+      "evidence": [
+        "docs/reports/NXB-102.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-103",
+      "title": "建立 macOS CI 与基本质量检查",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-102"
+      ],
+      "scope": [
+        ".github/",
+        "Makefile",
+        "scripts/",
+        "docs/"
+      ],
+      "acceptance": [
+        "提供锁定依赖的 macOS 自动构建、测试和格式检查工作流",
+        "区分无设备检查与需要真实 GPU 或设备的验证，记录工作流未运行和平台限制"
+      ],
+      "evidence": [
+        "docs/reports/NXB-103.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-104",
+      "title": "确定自有代码许可证与分发策略",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-101"
+      ],
+      "scope": [
+        "LICENSE",
+        "docs/",
+        "crates/"
+      ],
+      "acceptance": [
+        "由权利人确定自有代码许可证，保留第三方版权和许可证",
+        "按当前代码组合记录 GPL、BSD、客户端和编解码器的分发策略及待核查事项；实际发行物逐项审核留给 NXB-105"
+      ],
+      "evidence": [
+        "docs/reports/NXB-104.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-105",
+      "title": "准备开源技术预览发布",
+      "priority": "P0",
+      "status": "in_progress",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-101",
+        "NXB-102",
+        "NXB-103",
+        "NXB-104"
+      ],
+      "scope": [
+        "README.md",
+        "docs/",
+        "release metadata"
+      ],
+      "acceptance": [
+        "对实际源码与二进制发行物复核来源、GPL、BSD、客户端、编解码器及对应源码要求，审查敏感内容和构建、演示、CI 结果",
+        "整理首次提交、版本标签和变更记录的可审阅方案；实际发布以用户授权为准",
+        "不依赖 NXB-080，不宣称工业级或游戏性能验收"
+      ],
+      "evidence": [
+        "docs/reports/NXB-105.md",
+        "docs/release-preview.md",
+        "docs/release-dependencies.json",
+        "SECURITY.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-106",
+      "title": "分离媒体 worker 运行代码与实验工具",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-010",
+        "NXB-031"
+      ],
+      "scope": [
+        "adapters/nxnative/",
+        "tests/",
+        "scripts/",
+        "docs/"
+      ],
+      "acceptance": [
+        "将 worker 构建入口和测试 / 故障注入边界明确分离",
+        "保持上游精确修订、资源释放语义与现有回归；不覆盖用户上游工作副本"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-107",
+      "title": "贯通音频源时钟与间断恢复",
+      "priority": "P0",
+      "status": "blocked",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-031",
+        "NXB-032"
+      ],
+      "scope": [
+        "crates/nxbridge-gamestream/",
+        "vendor/moonshine-core/",
+        "tests/"
+      ],
+      "acceptance": [
+        "媒体编码下游接收源时间戳与间断信息，明确时钟映射及 session / generation 边界",
+        "实现有界的丢块恢复或明确的重同步策略，避免无限补偿与旧会话音频泄漏",
+        "以合成包验证正常播放、丢块、重复、乱序、时钟重置与断线；记录实际设备同步仍需验收"
+      ],
+      "evidence": [
+        "docs/reports/NXB-single-pad-20261104.md",
+        "docs/reports/NXB-107.md"
+      ],
+      "blockers": [
+        "11 月 5 日本机已复现并修复音频突发积压与视频 FEC 阻塞异步 I/O；新 Release 服务已加载。当前 ADB 无在线设备，11 月 4 日真实 Pad 的失败需同场景复测，音画同步与可靠性仍未验收。"
+      ]
+    },
+    {
+      "id": "NXB-108",
+      "title": "消除真实游戏和客户端构建的本机依赖",
+      "priority": "P0",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-010",
+        "NXB-106"
+      ],
+      "scope": [
+        "adapters/",
+        "config/",
+        "scripts/",
+        "docs/"
+      ],
+      "acceptance": [
+        "整理可公开的引擎工具链、确切上游修订及适配补丁，不包含游戏资产与私人数据",
+        "为正式 worker 和 Android 客户端建立可重复的构建步骤与版本记录",
+        "在隔离环境复现构建并记录工具链、未满足条件和实际产物；不把缓存构建称为全新系统验证"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-109",
+      "title": "为协议与媒体解析建立模糊测试",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-031",
+        "NXB-032"
+      ],
+      "scope": [
+        "crates/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "识别面向不可信输入的协议和媒体解析边界，并加入可复现的模糊测试入口",
+        "覆盖短包、超长、畸形和边界值；失败样本可复现且无私人数据",
+        "记录本地执行与 CI 时间预算，不把有限运行证明为无漏洞"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-110",
+      "title": "实现服务安装、升级与脱敏诊断",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-038",
+        "NXB-060"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "scripts/",
+        "docs/"
+      ],
+      "acceptance": [
+        "提供版本查询、受控服务启停、健康检查和日志维护",
+        "设计安装卸载、升级回滚、数据备份恢复与配置迁移，并验证失败恢复",
+        "诊断包默认不含游戏资产、凭据、私钥、存档和用户路径，测试脱敏规则"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-111",
+      "title": "优化服务端视频 FEC 构造与有界排队",
+      "priority": "P0",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-031",
+        "NXB-032"
+      ],
+      "scope": [
+        "vendor/",
+        "crates/nxbridge-gamestream/",
+        "tests/",
+        "scripts/",
+        "Cargo.toml",
+        "Cargo.lock",
+        "Makefile",
+        "docs/"
+      ],
+      "acceptance": [
+        "直接构造兼容 FEC 矩阵并验证字节一致与丢包恢复；缓存有界且不共享会话密钥和序号",
+        "限制视频排队与发送在途量，只在编码前淘汰过期原始帧；回归帧租约、参考帧顺序和取消",
+        "同机 Release 对照保留原始性能数据，并补充视频阶段耗时与长帧观测；Pad 与实际游戏验收继续由 NXB-107 / NXB-037 跟踪",
+        "工作区、协议、原生媒体及项目检查通过；部署或恢复过程可追踪，不更改玩家存档"
+      ],
+      "evidence": [
+        "docs/reports/NXB-111.md",
+        "vendor/fec-rs/NXBRIDGE-NOTICE.md",
+        "vendor/fec-rs/src/nxbridge_tests.rs",
+        "vendor/moonshine-core/src/session/stream/video/scheduling_tests.rs",
+        "tests/nxnative_video_queue.m"
+      ],
+      "blockers": []
+    }
+  ]
+}

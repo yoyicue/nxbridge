@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/nxbridge-host", "crates/nxbridge-media", "crates/nxbridge-stream", "crates/nxbridge-gamestream"]
+exclude = ["vendor/moonshine-core", "vendor/fec-rs"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+publish = false
+
+[patch.crates-io]
+fec-rs = { path = "vendor/fec-rs" }

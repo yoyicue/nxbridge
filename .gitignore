@@ -1,0 +1,35 @@
+# Local identity, credentials, measurements and game data
+.nxbridge/
+.env
+.env.*
+!.env.example
+artifacts/
+build/
+dist/
+.cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.app/
+*.dmg
+*.apk
+*.ipa
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.nca
+*.nso
+*.rpx
+*.wua
+*.wud
+*.wux
+*.sav
+*.keys
+*.key
+*.p12
+*.mobileprovision
+
+# Rust workspace build artifacts
+/target/
+/vendor/moonshine-core/target/

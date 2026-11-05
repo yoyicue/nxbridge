@@ -1,0 +1,52 @@
+// Guards the visibility edits this project depends on. If a `git subtree pull`
+// reverts them, this fails loudly instead of at the call site.
+#[test]
+fn protocol_layer_is_public() {
+    // Compile-time reachability: naming the paths is the assertion.
+    #[allow(unused_imports)]
+    use moonshine_core::crypto;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::gso_socket;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::packetizer::Packetizer;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::shard_batch::ShardBatch;
+
+    // Individual symbols consumed by rgsp-host, named directly so a
+    // `git subtree pull` that narrows visibility fails here instead of at
+    // the call site.
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::EncodedFrame;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::EncoderControl;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::gso_socket::UdpGsoSocket;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::packetizer::MAX_SHARDS;
+    #[allow(unused_imports)]
+    use moonshine_core::session::stream::video::shard_batch::ShardBuf;
+    // A crypto function, not just the module.
+    let _ = moonshine_core::crypto::encrypt;
+    // The seam this task added: SessionManager's accessor for the encoded-frame
+    // channel that feeds the video stream's packetize loop.
+    let _ = moonshine_core::session::manager::SessionManager::video_frame_sender;
+    // Symmetric accessor for client recovery requests (IDR / reference
+    // invalidation / reset), reaching the host encoder from outside the crate.
+    let _ = moonshine_core::session::manager::SessionManager::encoder_control_receiver;
+    // Accessor for the raw-PCM channel the host's ALSA capture feeds.
+    let _ = moonshine_core::session::manager::SessionManager::audio_frame_sender;
+    // The negotiated fps/bitrate the host's hardware encoder is configured from.
+    let _ = moonshine_core::session::manager::SessionManager::active_video_context;
+    // Whether any client is paired, which decides the on-screen status line.
+    // `PersistentState` lives in a `pub(crate)` module and cannot be named from
+    // out here, so the guard calls the method through the accessor instead —
+    // which fails to compile just the same if either is narrowed.
+    let _ = moonshine_core::clients::ClientManager::persistent_state;
+    fn _has_any_client(client_manager: &moonshine_core::clients::ClientManager) -> bool {
+        client_manager.persistent_state().has_any_client()
+    }
+    // The Opus frame size the host's capture period must match. Re-exported
+    // from the private `host_source` module; rgsp-host asserts equality with
+    // its own PERIOD_FRAMES at compile time, which needs this to stay `pub`.
+    const _: usize = moonshine_core::session::stream::audio::FRAME_FRAMES;
+}

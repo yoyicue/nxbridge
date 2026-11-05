@@ -1,0 +1,275 @@
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+@@ -155,35 +155,35 @@
+     }
+ 
+ 
+-    private static final int TRIGGER_L_BASE_X = 1;
+-    private static final int TRIGGER_R_BASE_X = 92;
+-    private static final int TRIGGER_DISTANCE = 23;
+-    private static final int TRIGGER_BASE_Y = 31;
+-    private static final int TRIGGER_WIDTH = 12;
+-    private static final int TRIGGER_HEIGHT = 9;
++    private static final int TRIGGER_L_BASE_X = 5;
++    private static final int TRIGGER_R_BASE_X = 101;
++    private static final int TRIGGER_DISTANCE = 11;
++    private static final int TRIGGER_BASE_Y = 20;
++    private static final int TRIGGER_WIDTH = 9;
++    private static final int TRIGGER_HEIGHT = 6;
+ 
+     // Face buttons are defined based on the Y button (button number 9)
+-    private static final int BUTTON_BASE_X = 106;
+-    private static final int BUTTON_BASE_Y = 1;
+-    private static final int BUTTON_SIZE = 10;
++    private static final int BUTTON_BASE_X = 110;
++    private static final int BUTTON_BASE_Y = 28;
++    private static final int BUTTON_SIZE = 6;
+ 
+     private static final int DPAD_BASE_X = 4;
+-    private static final int DPAD_BASE_Y = 41;
+-    private static final int DPAD_SIZE = 30;
++    private static final int DPAD_BASE_Y = 49;
++    private static final int DPAD_SIZE = 15;
+ 
+-    private static final int ANALOG_L_BASE_X = 6;
+-    private static final int ANALOG_L_BASE_Y = 4;
+-    private static final int ANALOG_R_BASE_X = 98;
+-    private static final int ANALOG_R_BASE_Y = 42;
+-    private static final int ANALOG_SIZE = 26;
++    private static final int ANALOG_L_BASE_X = 4;
++    private static final int ANALOG_L_BASE_Y = 30;
++    private static final int ANALOG_R_BASE_X = 105;
++    private static final int ANALOG_R_BASE_Y = 49;
++    private static final int ANALOG_SIZE = 16;
+ 
+     private static final int L3_R3_BASE_Y = 60;
+ 
+-    private static final int START_X = 83;
+-    private static final int BACK_X = 34;
+-    private static final int START_BACK_Y = 64;
+-    private static final int START_BACK_WIDTH = 12;
+-    private static final int START_BACK_HEIGHT = 7;
++    private static final int START_X = 84;
++    private static final int BACK_X = 28;
++    private static final int START_BACK_Y = 20;
++    private static final int START_BACK_WIDTH = 7;
++    private static final int START_BACK_HEIGHT = 6;
+ 
+     // Make the Guide Menu be in the center of START and BACK menu
+     private static final int GUIDE_X = START_X-BACK_X;
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -42,8 +42,8 @@
+ 
+     private final Paint paint = new Paint();
+ 
+-    private int normalColor = 0xF0888888;
+-    protected int pressedColor = 0xF00000FF;
++    private int normalColor = 0xF0F3F7FA;
++    protected int pressedColor = 0xF06CE5F1;
+     private int configMoveColor = 0xF0FF0000;
+     private int configResizeColor = 0xF0FF00FF;
+     private int configSelectedColor = 0xF000FF00;
+@@ -168,7 +168,7 @@
+ 
+     protected int getDefaultStrokeWidth() {
+         DisplayMetrics screen = getResources().getDisplayMetrics();
+-        return (int)(screen.heightPixels*0.004f);
++        return (int)(screen.heightPixels*0.002f);
+     }
+ 
+     protected void showConfigurationDialog() {
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
+@@ -138,18 +138,23 @@
+         // set transparent background
+         canvas.drawColor(Color.TRANSPARENT);
+ 
+-        paint.setTextSize(getPercent(getWidth(), 25));
++        paint.setAntiAlias(true);
++        paint.setTextSize(getPercent(getWidth(), 31));
++        paint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+         paint.setTextAlign(Paint.Align.CENTER);
+         paint.setStrokeWidth(getDefaultStrokeWidth());
+ 
+-        paint.setColor(isPressed() ? pressedColor : getDefaultColor());
+-        paint.setStyle(Paint.Style.STROKE);
+-
+         rect.left = rect.top = paint.getStrokeWidth();
+         rect.right = getWidth() - rect.left;
+         rect.bottom = getHeight() - rect.top;
+ 
++        // Translucent backing remains legible over bright game scenes.
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(isPressed() ? 0xC0208396 : 0x70121D29);
+         canvas.drawOval(rect, paint);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setColor(isPressed() ? pressedColor : getDefaultColor());
++        canvas.drawOval(rect, paint);
+ 
+         if (icon != -1) {
+             Drawable d = getResources().getDrawable(icon);
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
+@@ -36,116 +36,30 @@
+ 
+     @Override
+     protected void onElementDraw(Canvas canvas) {
+-        // set transparent background
+         canvas.drawColor(Color.TRANSPARENT);
+-
+-        paint.setTextSize(getPercent(getCorrectWidth(), 20));
++        paint.setAntiAlias(true);
+         paint.setTextAlign(Paint.Align.CENTER);
++        paint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
++        paint.setTextSize(getCorrectWidth() * 0.15f);
+         paint.setStrokeWidth(getDefaultStrokeWidth());
++        drawDirection(canvas, 1f / 6, 0.5f, "◀", DIGITAL_PAD_DIRECTION_LEFT);
++        drawDirection(canvas, 0.5f, 1f / 6, "▲", DIGITAL_PAD_DIRECTION_UP);
++        drawDirection(canvas, 5f / 6, 0.5f, "▶", DIGITAL_PAD_DIRECTION_RIGHT);
++        drawDirection(canvas, 0.5f, 5f / 6, "▼", DIGITAL_PAD_DIRECTION_DOWN);
++    }
+ 
+-        if (direction == DIGITAL_PAD_DIRECTION_NO_DIRECTION) {
+-            // draw no direction rect
+-            paint.setStyle(Paint.Style.STROKE);
+-            paint.setColor(getDefaultColor());
+-            canvas.drawRect(
+-                    getPercent(getWidth(), 36), getPercent(getHeight(), 36),
+-                    getPercent(getWidth(), 63), getPercent(getHeight(), 63),
+-                    paint
+-            );
+-        }
+-
+-        // draw left rect
+-        paint.setColor(
+-                (direction & DIGITAL_PAD_DIRECTION_LEFT) > 0 ? pressedColor : getDefaultColor());
++    private void drawDirection(Canvas canvas, float x, float y, String label, int bit) {
++        float cx = getWidth() * x, cy = getHeight() * y;
++        float radius = Math.min(getWidth(), getHeight()) * 0.145f;
++        boolean active = (direction & bit) != 0;
++        paint.setColor(active ? 0xC0208396 : 0x70121D29);
++        paint.setStyle(Paint.Style.FILL);
++        canvas.drawCircle(cx, cy, radius, paint);
+         paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawRect(
+-                paint.getStrokeWidth()+DPAD_MARGIN, getPercent(getHeight(), 33),
+-                getPercent(getWidth(), 33), getPercent(getHeight(), 66),
+-                paint
+-        );
+-
+-
+-        // draw up rect
+-        paint.setColor(
+-                (direction & DIGITAL_PAD_DIRECTION_UP) > 0 ? pressedColor : getDefaultColor());
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawRect(
+-                getPercent(getWidth(), 33), paint.getStrokeWidth()+DPAD_MARGIN,
+-                getPercent(getWidth(), 66), getPercent(getHeight(), 33),
+-                paint
+-        );
+-
+-        // draw right rect
+-        paint.setColor(
+-                (direction & DIGITAL_PAD_DIRECTION_RIGHT) > 0 ? pressedColor : getDefaultColor());
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawRect(
+-                getPercent(getWidth(), 66), getPercent(getHeight(), 33),
+-                getWidth() - (paint.getStrokeWidth()+DPAD_MARGIN), getPercent(getHeight(), 66),
+-                paint
+-        );
+-
+-        // draw down rect
+-        paint.setColor(
+-                (direction & DIGITAL_PAD_DIRECTION_DOWN) > 0 ? pressedColor : getDefaultColor());
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawRect(
+-                getPercent(getWidth(), 33), getPercent(getHeight(), 66),
+-                getPercent(getWidth(), 66), getHeight() - (paint.getStrokeWidth()+DPAD_MARGIN),
+-                paint
+-        );
+-
+-        // draw left up line
+-        paint.setColor((
+-                        (direction & DIGITAL_PAD_DIRECTION_LEFT) > 0 &&
+-                                (direction & DIGITAL_PAD_DIRECTION_UP) > 0
+-                ) ? pressedColor : getDefaultColor()
+-        );
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawLine(
+-                paint.getStrokeWidth()+DPAD_MARGIN, getPercent(getHeight(), 33),
+-                getPercent(getWidth(), 33), paint.getStrokeWidth()+DPAD_MARGIN,
+-                paint
+-        );
+-
+-        // draw up right line
+-        paint.setColor((
+-                        (direction & DIGITAL_PAD_DIRECTION_UP) > 0 &&
+-                                (direction & DIGITAL_PAD_DIRECTION_RIGHT) > 0
+-                ) ? pressedColor : getDefaultColor()
+-        );
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawLine(
+-                getPercent(getWidth(), 66), paint.getStrokeWidth()+DPAD_MARGIN,
+-                getWidth() - (paint.getStrokeWidth()+DPAD_MARGIN), getPercent(getHeight(), 33),
+-                paint
+-        );
+-
+-        // draw right down line
+-        paint.setColor((
+-                        (direction & DIGITAL_PAD_DIRECTION_RIGHT) > 0 &&
+-                                (direction & DIGITAL_PAD_DIRECTION_DOWN) > 0
+-                ) ? pressedColor : getDefaultColor()
+-        );
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawLine(
+-                getWidth()-paint.getStrokeWidth(), getPercent(getHeight(), 66),
+-                getPercent(getWidth(), 66), getHeight()-(paint.getStrokeWidth()+DPAD_MARGIN),
+-                paint
+-        );
+-
+-        // draw down left line
+-        paint.setColor((
+-                        (direction & DIGITAL_PAD_DIRECTION_DOWN) > 0 &&
+-                                (direction & DIGITAL_PAD_DIRECTION_LEFT) > 0
+-                ) ? pressedColor : getDefaultColor()
+-        );
+-        paint.setStyle(Paint.Style.STROKE);
+-        canvas.drawLine(
+-                getPercent(getWidth(), 33), getHeight()-(paint.getStrokeWidth()+DPAD_MARGIN),
+-                paint.getStrokeWidth()+DPAD_MARGIN, getPercent(getHeight(), 66),
+-                paint
+-        );
++        paint.setColor(active ? pressedColor : getDefaultColor());
++        canvas.drawCircle(cx, cy, radius, paint);
++        paint.setStyle(Paint.Style.FILL);
++        canvas.drawText(label, cx, cy - (paint.ascent() + paint.descent()) / 2, paint);
+     }
+ 
+     private void newDirectionCallback(int direction) {
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
+@@ -225,6 +225,12 @@
+         paint.setStyle(Paint.Style.STROKE);
+         paint.setStrokeWidth(getDefaultStrokeWidth());
+ 
++        // Soft backing makes the control visible over light and dark scenes.
++        paint.setAntiAlias(true);
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(isPressed() ? 0x90208396 : 0x50121D29);
++        canvas.drawCircle(getWidth() / 2, getHeight() / 2, radius_complete, paint);
++        paint.setStyle(Paint.Style.STROKE);
+         // draw outer circle
+         if (!isPressed() || click_state == CLICK_STATE.SINGLE) {
+             paint.setColor(getDefaultColor());
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 318
++        versionCode = 320
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'

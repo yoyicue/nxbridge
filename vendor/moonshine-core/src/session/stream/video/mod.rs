@@ -1,0 +1,509 @@
+use std::sync::Arc;
+
+use async_shutdown::ShutdownManager;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
+
+use crate::session::SessionKeysReceiver;
+use crate::session::manager::SessionShutdownReason;
+
+mod fec_cache;
+pub mod gso_socket;
+mod host_source;
+pub mod packetizer;
+pub mod shard_batch;
+use gso_socket::UdpGsoSocket;
+use host_source::spawn_packetize_frames;
+pub use host_source::{EncodedFrame, EncoderControl};
+use shard_batch::ShardBatch;
+
+/// The producer waits for local socket handoff before packetizing another frame.
+/// This is not a client acknowledgement; already encoded reference frames stay FIFO.
+pub(super) struct VideoPacketBatch {
+	batch: ShardBatch,
+	sent: oneshot::Sender<()>,
+}
+
+/// Static HDR metadata (HDR10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HdrMetadata {
+	/// Mastering display color primaries (CIE 1931 xy, in 0.00002 units).
+	pub display_primaries: [(u16, u16); 3],
+	/// White point (CIE 1931 xy, in 0.00002 units).
+	pub white_point: (u16, u16),
+	/// Maximum luminance in 0.0001 cd/m² units.
+	pub max_luminance: u32,
+	/// Minimum luminance in 0.0001 cd/m² units.
+	pub min_luminance: u32,
+	/// Maximum content light level in cd/m² (nits).
+	pub max_cll: u16,
+	/// Maximum frame-average light level in cd/m² (nits).
+	pub max_fall: u16,
+}
+
+/// HDR mode state sent from the video pipeline to the control stream.
+///
+/// Combines the `enabled` flag (whether the client should be in HDR mode)
+/// with optional HDR metadata. The `enabled` flag toggles based on actual
+/// frame content — SDR frames set it to false, HDR frames set it to true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HdrModeState {
+	/// Whether the client's display should be in HDR mode.
+	pub enabled: bool,
+	/// HDR10 static metadata from the composited content.
+	pub metadata: Option<HdrMetadata>,
+}
+
+impl HdrModeState {
+	/// Create an initial HDR mode state with the given enabled flag.
+	/// Metadata is `None` until the video pipeline provides it.
+	pub fn new(enabled: bool) -> Self {
+		Self {
+			enabled,
+			metadata: None,
+		}
+	}
+}
+
+impl HdrMetadata {
+	/// Reasonable fallback metadata for HDR10 when applications don't provide
+	/// their own. Uses BT.2020 primaries, D65 white point, and a conservative
+	/// 1000 nit peak luminance.
+	pub fn fallback() -> Self {
+		Self {
+			// BT.2020 display primaries in 0.00002 units.
+			display_primaries: [
+				(34000, 16000), // Red:   0.680, 0.320
+				(13250, 34500), // Green: 0.265, 0.690
+				(7500, 3000),   // Blue:  0.150, 0.060
+			],
+			// D65 white point in 0.00002 units.
+			white_point: (15635, 16450), // 0.3127, 0.3290
+			// 1000 nits max luminance in 0.0001 cd/m².
+			max_luminance: 10_000_000,
+			// 0.001 nits min luminance in 0.0001 cd/m².
+			min_luminance: 10,
+			// Unknown content light levels.
+			max_cll: 0,
+			max_fall: 0,
+		}
+	}
+}
+
+/// Configuration for the video stream.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoStreamConfig {
+	/// Port to use for streaming video data.
+	pub port: u16,
+
+	/// What percentage of data packets should be parity packets.
+	pub fec_percentage: u8,
+
+	/// Whether to enable video stream encryption (AES-128-GCM).
+	#[serde(default)]
+	pub encrypt: bool,
+
+	/// Whether to emit a WARN log when a single frame takes longer to encode and
+	/// packetize than the frame budget.
+	#[serde(default)]
+	pub log_frame_spikes: bool,
+}
+
+impl Default for VideoStreamConfig {
+	fn default() -> Self {
+		Self {
+			port: 47998,
+			fec_percentage: 20,
+			encrypt: false,
+			log_frame_spikes: false,
+		}
+	}
+}
+
+/// Per-frame encoding statistics emitted by the video pipeline.
+///
+/// Sent via `broadcast` channel, receivable through `SessionManager::bench_stats_receiver()`.
+#[derive(Clone, Debug)]
+pub struct FrameStats {
+	/// Time the frame spent waiting in the compositor's output channel.
+	pub channel_wait: std::time::Duration,
+	/// Time spent importing the DMA-BUF into Vulkan.
+	pub import: std::time::Duration,
+	/// Time spent on GPU color conversion.
+	pub convert: std::time::Duration,
+	/// Time spent submitting the frame to the asynchronous encoder.
+	pub submit: std::time::Duration,
+	/// Time between submit completion and the packet consumer awaiting the encode future.
+	pub consumer_queue: std::time::Duration,
+	/// Time from submit completion until the asynchronous encode/readback future has resolved.
+	pub encode_wait: std::time::Duration,
+	/// Time spent packetizing the encoded data.
+	pub packetize: std::time::Duration,
+	/// Time spent sending the packets over the channel.
+	pub send: std::time::Duration,
+	/// Total end-to-end latency for this frame.
+	pub total: std::time::Duration,
+	/// Number of bytes encoded for this frame.
+	pub encoded_bytes: usize,
+	/// Whether this frame is a key (IDR) frame.
+	pub is_key_frame: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoFormat {
+	#[default]
+	H264,
+	Hevc,
+	Av1,
+}
+
+impl TryFrom<u32> for VideoFormat {
+	type Error = ();
+
+	fn try_from(value: u32) -> Result<Self, Self::Error> {
+		match value {
+			0 => Ok(Self::H264),
+			1 => Ok(Self::Hevc),
+			2 => Ok(Self::Av1),
+			_ => Err(()),
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoDynamicRange {
+	#[default]
+	Sdr,
+	Hdr,
+}
+
+impl TryFrom<u32> for VideoDynamicRange {
+	type Error = ();
+
+	fn try_from(value: u32) -> Result<Self, Self::Error> {
+		match value {
+			0 => Ok(Self::Sdr),
+			1 => Ok(Self::Hdr),
+			_ => Err(()),
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoChromaSampling {
+	#[default]
+	Yuv420,
+	Yuv444,
+}
+
+impl TryFrom<u32> for VideoChromaSampling {
+	type Error = ();
+
+	fn try_from(value: u32) -> Result<Self, Self::Error> {
+		match value {
+			0 => Ok(Self::Yuv420),
+			1 => Ok(Self::Yuv444),
+			_ => Err(()),
+		}
+	}
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VideoStreamContext {
+	/// Width of the video stream in pixels.
+	pub width: u32,
+
+	/// Height of the video stream in pixels.
+	pub height: u32,
+
+	/// Frames per second of the video stream.
+	pub fps: u32,
+
+	/// Size of each encoded packet in bytes.
+	pub packet_size: usize,
+
+	/// Target bitrate for the video stream in bits per second.
+	pub bitrate: usize,
+
+	/// Minimum number of FEC packets to include for each frame.
+	pub minimum_fec_packets: u32,
+
+	/// Whether to apply QoS markings to video stream packets.
+	pub qos: bool,
+
+	/// Video format to use for encoding the stream.
+	pub video_format: VideoFormat,
+
+	/// Dynamic range of the video stream.
+	pub dynamic_range: VideoDynamicRange,
+
+	/// Chroma sampling type for the video stream.
+	pub chroma_sampling_type: VideoChromaSampling,
+
+	/// Maximum number of reference frames for the video encoder.
+	pub max_reference_frames: u32,
+
+	/// Whether the client asked for full-range (0-255) rather than
+	/// limited-range (16-235) luma.
+	pub full_range: bool,
+
+	/// Whether the client has enabled video encryption.
+	pub encrypt_video: bool,
+}
+
+/// Handle returned by `VideoStream::start` that gates the pipeline and packet handler.
+///
+/// The pipeline and packet handler are spawned immediately but block on a `Notify`
+/// until `trigger()` is called on `StartB`.
+#[derive(Clone)]
+pub(crate) struct VideoStreamHandle {
+	notify: Arc<Notify>,
+	idr_tx: broadcast::Sender<()>,
+	/// Reference frame invalidation requests, carrying the inclusive
+	/// `[first, last]` client frame-index range the client could not decode.
+	invalidate_tx: broadcast::Sender<(u32, u32)>,
+	reset_tx: broadcast::Sender<()>,
+}
+
+impl VideoStreamHandle {
+	/// Signal the video pipeline and packet handler to begin processing.
+	pub fn trigger(&self) {
+		// Call notify_one() twice instead of notify_waiters() because
+		// Notify only wakes tasks already .awaiting; notify_waiters()
+		// is a no-op if no task is waiting yet.  notify_one() stores
+		// a permit so the next notified().await completes immediately.
+		self.notify.notify_one();
+		self.notify.notify_one();
+	}
+
+	/// Request an IDR (key) frame from the encoder.
+	pub fn request_idr_frame(&self) {
+		let _ = self.idr_tx.send(());
+	}
+
+	/// Request reference frame invalidation for the inclusive client frame-index
+	/// range `[first, last]` the client reported it could not decode.
+	///
+	/// The encoder drops the affected references and recovers by predicting from
+	/// a surviving reference where possible, falling back to an IDR only when no
+	/// reference survives — much cheaper than always re-sending a keyframe.
+	pub fn invalidate_reference_frames(&self, first: u32, last: u32) {
+		let _ = self.invalidate_tx.send((first, last));
+	}
+
+	/// Reset the stream's frame/sequence counters for a resuming client.
+	///
+	/// Called when a client reconnects to an already-running session. The pipeline
+	/// keeps incrementing `frame_number` for the lifetime of the session, but a fresh
+	/// Moonlight session expects frame numbers to start at 1; without a reset it counts
+	/// the jump as massive frame loss and reports a poor connection. This also forces an
+	/// IDR so the resumed client has a decodable starting frame.
+	pub fn request_reset(&self) {
+		let _ = self.reset_tx.send(());
+	}
+
+	/// Clone the start notify for external triggering (e.g. bench binary).
+	pub fn clone_start_notify(&self) -> Arc<Notify> {
+		self.notify.clone()
+	}
+}
+
+pub(crate) struct VideoStream {
+	socket: UdpGsoSocket,
+	hdr_metadata_tx: watch::Sender<HdrModeState>,
+	stats_tx: tokio::sync::broadcast::Sender<FrameStats>,
+}
+
+impl VideoStream {
+	pub async fn new(
+		config: VideoStreamConfig,
+		address: String,
+		hdr_metadata_tx: watch::Sender<HdrModeState>,
+		_stop: ShutdownManager<SessionShutdownReason>,
+		stats_tx: tokio::sync::broadcast::Sender<FrameStats>,
+	) -> Result<Self, ()> {
+		tracing::debug!("Initializing video stream.");
+
+		let socket = UdpGsoSocket::new(&address, config.port).await?;
+
+		tracing::debug!(
+			"Listening for video messages on {}",
+			socket
+				.local_addr()
+				.map_err(|e| tracing::warn!("Failed to get local address associated with video socket: {e}"))?
+		);
+
+		Ok(Self {
+			socket,
+			hdr_metadata_tx,
+			stats_tx,
+		})
+	}
+
+	/// `control_tx` carries client recovery requests (IDR / reference
+	/// invalidation / stream reset) out to the host's encoder, mapped to
+	/// `EncoderControl` by the packetize loop — see `host_source`'s module
+	/// docs for why they're collapsed into one channel instead of exposed
+	/// as the three raw broadcast channels `VideoStreamHandle` uses
+	/// internally.
+	#[allow(clippy::too_many_arguments)]
+	pub fn start(
+		self,
+		config: VideoStreamConfig,
+		context: VideoStreamContext,
+		keys_rx: SessionKeysReceiver,
+		frame_rx: mpsc::Receiver<EncodedFrame>,
+		control_tx: mpsc::Sender<EncoderControl>,
+		stop: ShutdownManager<SessionShutdownReason>,
+	) -> Result<VideoStreamHandle, ()> {
+		// The Vulkan encode pipeline that both encoded frames and packetized
+		// them was removed with the compositor. Encoding now happens outside
+		// the crate (the host's Cedar encoder feeds `frame_rx`); packetizing
+		// stays here, in the protocol layer, via `spawn_packetize_frames`.
+		let Self {
+			socket,
+			hdr_metadata_tx: _hdr_metadata_tx,
+			stats_tx: _stats_tx,
+		} = self;
+
+		// Apply QoS to UDP socket.
+		if context.qos {
+			let _ = socket.set_tos_v4(160);
+		}
+
+		// Gate for packetize loop + packet handler.
+		let start_notify = Arc::new(Notify::new());
+
+		// IDR broadcast channel. Subscribed by both `VideoStreamHandle`
+		// (unused internally beyond bookkeeping) and the packetize loop
+		// below, which is the actual consumer — it maps every message to
+		// `EncoderControl` and forwards it out to the host via `control_tx`.
+		let (idr_tx, idr_rx) = broadcast::channel(1);
+
+		// Reference frame invalidation broadcast channel. Sized for a small burst
+		// of loss reports; the packetize loop drains all pending each iteration.
+		let (invalidate_tx, invalidate_rx) = broadcast::channel(16);
+
+		// Stream-reset broadcast channel (client reconnect/resume).
+		let (reset_tx, reset_rx) = broadcast::channel(1);
+
+		// One acknowledged batch at a time, including the active socket send.
+		// Preserve encoded reference order while pushing pressure back to the
+		// host, which can replace raw frames before encoding.
+		let (packet_tx, packet_rx) = mpsc::channel::<VideoPacketBatch>(1);
+
+		// Spawn packet handler — gated behind start_notify.
+		spawn_handle_video_packets(packet_rx, socket, start_notify.clone(), stop.clone());
+
+		// Spawn packetize loop — gated behind start_notify. Also the sole
+		// consumer of idr_rx/invalidate_rx/reset_rx: it maps client
+		// recovery requests to `EncoderControl` and forwards them to the
+		// host via `control_tx`.
+		spawn_packetize_frames(
+			frame_rx,
+			config,
+			context,
+			keys_rx,
+			packet_tx,
+			idr_rx,
+			invalidate_rx,
+			reset_rx,
+			control_tx,
+			start_notify.clone(),
+			stop,
+		);
+
+		Ok(VideoStreamHandle {
+			notify: start_notify,
+			idr_tx,
+			invalidate_tx,
+			reset_tx,
+		})
+	}
+}
+
+fn spawn_handle_video_packets(
+	mut packet_rx: mpsc::Receiver<VideoPacketBatch>,
+	socket: UdpGsoSocket,
+	start: Arc<Notify>,
+	stop_session_manager: ShutdownManager<SessionShutdownReason>,
+) {
+	tokio::spawn(async move {
+		if stop_session_manager.wrap_cancel(start.notified()).await.is_err() {
+			return;
+		}
+
+		let mut buf = [0; 1024];
+		let mut client_address = None;
+		// Rate-limits the GSO-fallback warning.
+		let mut last_send_warn: Option<std::time::Instant> = None;
+
+		// Trigger session shutdown if we exit unexpectedly.
+		let _stop_token = stop_session_manager.trigger_shutdown_token(SessionShutdownReason::VideoPacketHandlerStopped);
+		let _delay_stop = stop_session_manager.delay_shutdown_token();
+
+		while !stop_session_manager.is_shutdown_triggered() {
+			tokio::select! {
+				batch = stop_session_manager.wrap_cancel(packet_rx.recv()) => {
+					match batch {
+						Ok(Some(VideoPacketBatch { batch, sent })) => {
+							if let Some(addr) = client_address {
+								if batch.shard_count() == 0 {
+									let _ = sent.send(());
+									continue;
+								}
+
+								// Sends are wrapped in wrap_cancel so a socket that
+								// stops draining cannot block session shutdown.
+								match stop_session_manager
+									.wrap_cancel(socket.send_batch(&batch, addr))
+									.await
+								{
+									Ok(failed_chunks) => {
+										if failed_chunks > 0
+											&& last_send_warn
+												.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+										{
+											tracing::warn!(
+												"GSO send failed for {failed_chunks} chunk(s), sent per-shard instead"
+											);
+											last_send_warn = Some(std::time::Instant::now());
+										}
+									},
+									Err(_) => break,
+								}
+							}
+							let _ = sent.send(());
+						},
+						Ok(None) => {
+							tracing::debug!("Video packet channel closed.");
+							break;
+						},
+						Err(_) => break,
+					}
+				},
+
+				message = stop_session_manager.wrap_cancel(socket.recv_from(&mut buf)) => {
+					let (len, address) = match message {
+						Ok(Ok((len, address))) => (len, address),
+						Ok(Err(e)) => {
+							tracing::warn!("Failed to receive message: {e}");
+							break;
+						},
+						Err(_) => break,
+					};
+
+					if &buf[..len] == b"PING" {
+						tracing::trace!("Received video stream PING message from {address}.");
+						client_address = Some(address);
+					} else {
+						tracing::warn!("Received unknown message on video stream of length {len}.");
+					}
+				},
+			}
+		}
+
+		tracing::debug!("Video packet stream stopped.");
+	});
+}
