@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn real_opus_and_fec_keep_rtp_timestamps_regular_after_gap() {
+    async fn real_opus_and_fec_keep_rtp_timestamps_regular_after_gap_and_stall() {
         let (tx, rx) = mpsc::channel(4);
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(16);
         let (recycle_tx, recycle_rx) = crossbeam_channel::bounded(16);
@@ -305,12 +305,28 @@ mod tests {
         ).unwrap();
         spawn_pcm_bridge(rx, 2, frame_tx, recycle_rx, gate.clone(), stop.clone());
         gate.open();
-        tx.send(chunk(1_000_000_000, false)).await.unwrap();
-        tx.send(chunk(1_015_000_000, true)).await.unwrap();
+        // Keep a live source after the injected gap. The encoder deliberately
+        // expires PCM after 20 ms: on a busy runner, four startup blocks need
+        // not all survive. Exact concealment is tested below without an encoder;
+        // this test checks RTP/FEC continuity with the real expiration policy.
+        let producer_stop = stop.clone();
+        let producer = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            for index in 0u64.. {
+                if producer_stop.wrap_cancel(interval.tick()).await.is_err() { break; }
+                let steps = if index == 0 { 0 } else { index + 2 };
+                let next = chunk(1_000_000_000 + steps * BLOCK_NS, index == 1);
+                match producer_stop.wrap_cancel(tx.send(next)).await {
+                    Ok(Ok(())) => {},
+                    _ => break,
+                }
+            }
+        });
         let mut data_timestamps = Vec::new();
         let mut parity = 0;
-        for _ in 0..4 {
-            let batch = tokio::time::timeout(std::time::Duration::from_secs(2), packet_rx.recv())
+        for batch_index in 0..4 {
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(5), packet_rx.recv())
                 .await.unwrap().unwrap();
             for pkt in &batch.packets {
                 assert!(pkt.len() > 12);
@@ -320,12 +336,15 @@ mod tests {
                     other => panic!("unexpected RTP type {other}"),
                 }
             }
+            // Force PCM expiration behind one held send completion as well as
+            // the source timestamp gap, without changing production deadlines.
+            if batch_index == 0 { tokio::time::sleep(std::time::Duration::from_millis(40)).await; }
             batch.sent.send(()).unwrap();
         }
         assert_eq!(data_timestamps, vec![0, 5, 10, 15]);
         assert_eq!(parity, 2);
         let _ = stop.trigger_shutdown(SessionShutdownReason::UserStopped);
-        drop(tx);
+        producer.await.unwrap();
     }
 
     #[tokio::test]

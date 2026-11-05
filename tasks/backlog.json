@@ -901,7 +901,13 @@
       "scope": [
         "README.md",
         "docs/",
-        "release metadata"
+        "release metadata",
+        ".github/",
+        "Cargo.toml",
+        "Cargo.lock",
+        "vendor/",
+        "adapters/",
+        "tests/"
       ],
       "acceptance": [
         "对实际源码与二进制发行物复核来源、GPL、BSD、客户端、编解码器及对应源码要求，审查敏感内容和构建、演示、CI 结果",

@@ -427,9 +427,18 @@ mod tests {
         let stop = ShutdownManager::new();
         AudioEncoder::spawn(48000, &super::super::OPUS_STEREO, frame_rx, recycle,
             keys_rx, false, packets, stop.clone(), gate.clone()).unwrap();
-        frames.send(frame(1, Duration::ZERO)).unwrap();
         gate.open();
-        let held = tokio::time::timeout(Duration::from_secs(2), packet_rx.recv()).await.unwrap().unwrap();
+        // Supply fresh startup PCM until the encoder is ready. A slow thread
+        // start may legitimately expire the first block before any packet exists.
+        let held = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let _ = frames.try_send(frame(1, Duration::ZERO));
+                tokio::select! {
+                    packet = packet_rx.recv() => break packet.unwrap(),
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+                }
+            }
+        }).await.unwrap();
         for pts in 2..=10 { frames.send(frame(pts, Duration::ZERO)).unwrap(); }
         // Hold completion as a stalled network sender would. Nothing else may
         // be encoded into an independent packet backlog while it is held.
