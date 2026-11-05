@@ -1,6 +1,6 @@
 # v0.1.0-alpha.1 开发者源码预览
 
-仓库：[yoyicue/nxbridge](https://github.com/yoyicue/nxbridge)。本版面向参与开发和协议、媒体链路研究的开发者；完整家庭游戏服务仍在开发。
+仓库：[yoyicue/nxbridge](https://github.com/yoyicue/nxbridge)。[下载源码预览](https://github.com/yoyicue/nxbridge/releases/tag/v0.1.0-alpha.1)。本版面向参与开发和协议、媒体链路研究的开发者；完整家庭游戏服务仍在开发。
 
 ## 本次提供
 

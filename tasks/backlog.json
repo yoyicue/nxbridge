@@ -890,7 +890,7 @@
       "id": "NXB-105",
       "title": "准备开源技术预览发布",
       "priority": "P0",
-      "status": "in_progress",
+      "status": "done",
       "owner": "codex",
       "depends_on": [
         "NXB-101",
