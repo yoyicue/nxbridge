@@ -1,0 +1,22 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 376
++        versionCode = 377
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -627,6 +627,8 @@
+             FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
+             FrameLayout.LayoutParams sp = (FrameLayout.LayoutParams)shoulder.getLayoutParams();
+             p.leftMargin = sp.leftMargin + (sp.width - p.width) / 2;
++            int gap = (int)Math.ceil(4 * context.getResources().getDisplayMetrics().density);
++            p.topMargin = Math.min(p.topMargin, sp.topMargin - p.height - gap);
+             e.requestLayout();
+         }
+     }

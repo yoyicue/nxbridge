@@ -1,0 +1,24 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 371
++        versionCode = 372
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -2696,6 +2696,10 @@
+     }
+ 
+     public synchronized boolean handleButtonDown(KeyEvent event) {
++        // A repeated DOWN is not a new physical press. In particular, Android
++        // can deliver repeats for a button held while the stream lost focus.
++        // Do not let that old hold reclaim control after lifecycle neutralization.
++        if (event.getRepeatCount() != 0) return true;
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;

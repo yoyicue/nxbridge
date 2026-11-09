@@ -74,6 +74,45 @@ impl Default for WebserverConfig {
 	}
 }
 
+fn app_list_xml(applications: &[ApplicationConfig], hdr_supported: bool) -> String {
+		let mut response = "<root status_code=\"200\">".to_string();
+		for application in applications.iter() {
+			response += "<App>";
+
+			let hdr_supported = u8::from(hdr_supported);
+			response += format!("<IsHdrSupported>{hdr_supported}</IsHdrSupported>").as_ref();
+			response += format!("<AppTitle>{}</AppTitle>", escape_xml(&application.title)).as_ref();
+			response += format!("<ID>{}</ID>", application.id()).as_ref();
+			if let Some(id) = &application.library_game_id {
+				response += format!("<NXBridgeGameId>{}</NXBridgeGameId>", escape_xml(id)).as_ref();
+			}
+			if let Some(bytes) = application.boxart.as_ref().and_then(|p| std::fs::read(p).ok()) {
+				response += format!("<NXBridgeCoverVersion>{}</NXBridgeCoverVersion>", hex::encode(Sha256::digest(bytes))).as_ref();
+			}
+
+			response += "</App>";
+		}
+
+		response += "</root>";
+
+		response
+}
+
+#[cfg(test)]
+mod nxb_library_identity_tests {
+    use super::*;
+    #[test]
+    fn stable_library_id_is_optional_escaped_and_independent_of_title() {
+        let mut app = ApplicationConfig { title: "First".into(), library_game_id: Some("game&one".into()), ..Default::default() };
+        let first = app_list_xml(&[app.clone()], false);
+        assert!(first.contains("<NXBridgeGameId>game&amp;one</NXBridgeGameId>"));
+        app.title = "Renamed".into();
+        assert!(app_list_xml(&[app.clone()], false).contains("<NXBridgeGameId>game&amp;one</NXBridgeGameId>"));
+        app.library_game_id = None;
+        assert!(!app_list_xml(&[app], false).contains("NXBridgeGameId"));
+    }
+}
+
 // The negative fourth value is to indicate that we are following the protocol introduced with Sunshine.
 const SERVERINFO_APP_VERSION: &str = "7.1.431.-1";
 const SERVERINFO_GFE_VERSION: &str = "3.23.0.74";
@@ -430,24 +469,9 @@ impl Webserver {
 	}
 
 	fn app_list(&self) -> Response<Full<Bytes>> {
-		let mut response = "<root status_code=\"200\">".to_string();
-		for application in self.applications.iter() {
-			response += "<App>";
-
-			let hdr_supported = u8::from(self.hdr_supported);
-			response += format!("<IsHdrSupported>{hdr_supported}</IsHdrSupported>").as_ref();
-			response += format!("<AppTitle>{}</AppTitle>", escape_xml(&application.title)).as_ref();
-			response += format!("<ID>{}</ID>", application.id()).as_ref();
-
-			response += "</App>";
-		}
-
-		response += "</root>";
-
+		let response = app_list_xml(&self.applications, self.hdr_supported);
 		let mut response = Response::new(Full::new(Bytes::from(response)));
-		response
-			.headers_mut()
-			.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/xml"));
+		response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/xml"));
 		response
 	}
 

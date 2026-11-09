@@ -1,0 +1,176 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 357
++        versionCode = 359
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -13,6 +13,7 @@
+ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.security.MessageDigest;
++import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+@@ -188,14 +189,31 @@
+         }
+     }
+ 
+-    boolean previewPrevious(List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
++    /** Offer only complete, valid older revisions; never mutate them while previewing. */
++    List<Long> validHistory(List<VirtualControllerElement> elements, long currentRevision, boolean currentInvalid) throws IOException {
+         synchronized (LOCK) {
+-            JSONObject current = readDocument(file); if (current == null || current.getLong("revision") < 2) return false;
+-            JSONObject doc = readDocument(history(current.getLong("revision") - 1)); if (doc == null) return false;
+-            applyDocument(doc, elements, controller); return true;
++            List<Long> valid = new ArrayList<>();
++            for (long revision : historyRevisions().descendingSet()) {
++                if (!currentInvalid && revision >= currentRevision) continue;
++                try {
++                    JSONObject old = readDocument(history(revision));
++                    if (old == null || old.getLong("revision") != revision) continue;
++                    validate(old, elements);
++                    valid.add(revision);
++                } catch (IOException | JSONException invalid) { /* Retain but do not offer broken revisions. */ }
++            }
++            return valid;
+         }
+     }
+ 
++    void previewHistory(long revision, List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
++        synchronized (LOCK) {
++            JSONObject doc = readDocument(history(revision));
++            if (doc == null || doc.getLong("revision") != revision) throw new IOException("historical layout changed");
++            applyDocument(doc, elements, controller);
++        }
++    }
++
+     private void applyDocument(JSONObject doc, List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
+             HashMap<String, JSONObject> found = validate(doc, elements);
+             controller.setVisualOptions(doc.optBoolean("haptic", false), doc.optBoolean("fade", false), doc.optBoolean("contrast", false));
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -394,22 +394,34 @@
+     private void previousVersion() {
+         if (profileStore == null || saving) return;
+         try {
+-            HashMap<String, JSONObject> old = snapshotGeometry();
+-            boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
+-            boolean found = invalidProfileFingerprint != null ? profileStore.previewLatestValidHistory(elements, this) : profileStore.previewPrevious(elements, this);
+-            if (found) {
+-                try {
+-                    boolean adjusted = constrainElementsToSafeArea();
+-                    profileStore.capture(elements, localHaptics, idleFade, highContrast);
+-                    undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast; invalidateElements();
+-                    if (adjusted) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
+-                } catch (Exception e) {
+-                    applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast); invalidateElements();
+-                    Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
+-                }
+-            }
+-            else Toast.makeText(context, R.string.nxb_layout_no_previous, Toast.LENGTH_SHORT).show();
++            final java.util.List<Long> revisions = profileStore.validHistory(elements, profileRevision, invalidProfileFingerprint != null);
++            if (revisions.isEmpty()) { Toast.makeText(context, R.string.nxb_layout_no_previous, Toast.LENGTH_SHORT).show(); return; }
++            String[] labels = new String[revisions.size()];
++            for (int i = 0; i < revisions.size(); i++) labels[i] = context.getString(R.string.nxb_layout_history_item, revisions.get(i));
++            new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_history_title)
++                    .setItems(labels, (dialog, which) -> previewHistory(revisions.get(which)))
++                    .setNegativeButton(android.R.string.cancel, null).show();
+         } catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
++    }
++
++    private void previewHistory(long revision) {
++        if (!isEditing() || saving || profileStore == null) return;
++        HashMap<String, JSONObject> old = null;
++        boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
++        try {
++            old = snapshotGeometry();
++            profileStore.previewHistory(revision, elements, this);
++            boolean adjusted = constrainElementsToSafeArea();
++            profileStore.capture(elements, localHaptics, idleFade, highContrast);
++            undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast;
++            editorStatus.setText(context.getString(R.string.nxb_layout_history_preview, revision));
++            invalidateElements();
++            if (adjusted) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
++        } catch (Exception e) {
++            try { if (old != null) applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast); invalidateElements(); }
++            catch (Exception ignored) { }
++            Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
++        }
+     }
+ 
+     public void beginEditing(Runnable finished) {
+--- a/app/src/main/java/com/limelight/InputLabActivity.java
++++ b/app/src/main/java/com/limelight/InputLabActivity.java
+@@ -172,7 +172,7 @@
+         if (input != null && (event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK && input.handleMotionEvent(event)) return true;
+         return super.onGenericMotionEvent(event);
+     }
+-    @Override protected void onResume() { super.onResume(); if (input != null) input.setLayoutInputSuppressed(false); }
++    @Override protected void onResume() { super.onResume(); if (input != null) input.setLayoutInputSuppressed(controller != null && controller.isEditing()); }
+     @Override protected void onPause() {
+         if (input != null) input.setLayoutInputSuppressed(true);
+         if (controller != null) controller.cancelForPhysicalTakeover();
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -322,7 +322,7 @@
+     <string name="nxb_layout_load_failed">Layout could not be loaded; the previous file was kept</string>
+     <string name="nxb_layout_recovery_hint">Layout unavailable · save to recover</string>
+     <string name="nxb_layout_recovery_title">Recover unavailable layout?</string>
+-    <string name="nxb_layout_recovery_explain">The original file will be backed up on this device before the current draft is saved. You can also preview the latest valid previous version first.</string>
++    <string name="nxb_layout_recovery_explain">The original file will be backed up on this device before the current draft is saved. You can also choose a valid version from Layout history to preview first.</string>
+     <string name="nxb_layout_recovery_save">Back up and save</string>
+     <string name="nxb_layout_recovery_done">Original backed up; layout saved</string>
+     <string name="nxb_layout_save_failed">Could not save layout; your draft is still open</string>
+@@ -345,7 +345,7 @@
+     <string name="nxb_layout_safe_adjusted">Layout adjusted for the safe area. Save to keep these changes; the original file is unchanged.</string>
+     <string name="nxb_layout_safe_conflict">Layout cannot fit the safe area without conflicting controls. Defaults are shown; the original file is unchanged.</string>
+     <string name="nxb_layout_undo">Undo</string>
+-    <string name="nxb_layout_previous">Previous version</string>
++    <string name="nxb_layout_previous">Layout history</string>
+     <string name="nxb_layout_no_previous">No previous version</string>
+     <string name="nxb_layout_left_stick">Left stick area</string>
+     <string name="nxb_layout_right_stick">Right stick area</string>
+@@ -377,4 +377,7 @@
+     <string name="nxb_gesture_right">Double-tap right stick for R3</string>
+     <string name="nxb_button_l3">Show L3 button</string>
+     <string name="nxb_button_r3">Show R3 button</string>
++    <string name="nxb_layout_history_title">Choose a version to preview</string>
++    <string name="nxb_layout_history_item">Version %1$d</string>
++    <string name="nxb_layout_history_preview">Version %1$d · preview only; save to apply</string>
+ </resources>
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -303,7 +303,7 @@
+     <string name="nxb_layout_load_failed">布局无法读取，原文件已保留</string>
+     <string name="nxb_layout_recovery_hint">布局无法读取 · 可保存恢复</string>
+     <string name="nxb_layout_recovery_title">恢复无法读取的布局？</string>
+-    <string name="nxb_layout_recovery_explain">会先在本机备份原布局文件，再保存当前草稿。也可以先选择“上个版本”预览最近的有效版本。</string>
++    <string name="nxb_layout_recovery_explain">会先在本机备份原布局文件，再保存当前草稿。也可以先选择“历史版本”预览有效的旧版本。</string>
+     <string name="nxb_layout_recovery_save">备份并保存</string>
+     <string name="nxb_layout_recovery_done">原布局已备份，当前布局已保存</string>
+     <string name="nxb_layout_save_failed">保存失败，草稿仍保留</string>
+@@ -326,7 +326,7 @@
+     <string name="nxb_layout_safe_adjusted">布局已临时适配安全区域；保存后生效，原文件未改动</string>
+     <string name="nxb_layout_safe_conflict">布局适配安全区域后有冲突，已显示默认布局；原文件未改动</string>
+     <string name="nxb_layout_undo">撤销</string>
+-    <string name="nxb_layout_previous">上个版本</string>
++    <string name="nxb_layout_previous">历史版本</string>
+     <string name="nxb_layout_no_previous">没有上一个版本</string>
+     <string name="nxb_layout_left_stick">左摇杆区域</string>
+     <string name="nxb_layout_right_stick">右摇杆区域</string>
+@@ -358,4 +358,7 @@
+     <string name="nxb_gesture_right">双击右摇杆触发 R3</string>
+     <string name="nxb_button_l3">显示 L3 按钮</string>
+     <string name="nxb_button_r3">显示 R3 按钮</string>
++    <string name="nxb_layout_history_title">选择要预览的版本</string>
++    <string name="nxb_layout_history_item">版本 %1$d</string>
++    <string name="nxb_layout_history_preview">版本 %1$d · 仅预览，保存后生效</string>
+ </resources>

@@ -1,0 +1,496 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 9a98cc72..a3bc4b3c 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 354
++        versionCode = 356
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 52544820..3ceb9419 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -145,6 +145,8 @@
+         </activity>
+         <activity android:name=".LayoutEditorActivity" android:screenOrientation="userLandscape"
+             android:exported="false" android:theme="@style/StreamTheme" />
++        <activity android:name=".InputLabActivity" android:screenOrientation="userLandscape"
++            android:exported="false" android:theme="@style/StreamTheme" />
+         <activity
+             android:name=".Game"
+             android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection"
+@@ -190,4 +192,4 @@
+         </activity>
+     </application>
+ 
+-</manifest>
+\ No newline at end of file
++</manifest>
+diff --git a/app/src/main/java/com/limelight/AppView.java b/app/src/main/java/com/limelight/AppView.java
+index 3faa2752..48db4110 100644
+--- a/app/src/main/java/com/limelight/AppView.java
++++ b/app/src/main/java/com/limelight/AppView.java
+@@ -71,6 +71,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+     private final static int CREATE_SHORTCUT_ID = 6;
+     private final static int HIDE_APP_ID = 7;
+     private final static int EDIT_LAYOUT_ID = 8;
++    private final static int INPUT_LAB_ID = 9;
+ 
+     public final static String HIDDEN_APPS_PREF_FILENAME = "HiddenApps";
+ 
+@@ -417,6 +418,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+ 
+         menu.add(Menu.NONE, VIEW_DETAILS_ID, 4, getResources().getString(R.string.applist_menu_details));
+         menu.add(Menu.NONE, EDIT_LAYOUT_ID, 5, getResources().getString(R.string.nxb_layout_entry));
++        menu.add(Menu.NONE, INPUT_LAB_ID, 6, getResources().getString(R.string.nxb_input_lab));
+ 
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+             // Only add an option to create shortcut if box art is loaded
+@@ -481,6 +483,9 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+             case EDIT_LAYOUT_ID:
+                 openLayoutEditor(app.app);
+                 return true;
++            case INPUT_LAB_ID:
++                openInputLab(app.app);
++                return true;
+             case VIEW_DETAILS_ID:
+                 Dialog.displayDialog(AppView.this, getResources().getString(R.string.title_details), app.app.toString(), false);
+                 return true;
+@@ -519,6 +524,15 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+         startActivity(intent);
+     }
+ 
++    private void openInputLab(NvApp app) {
++        Intent intent = new Intent(this, InputLabActivity.class);
++        intent.putExtra(Game.EXTRA_LIBRARY_GAME_ID, app.getLibraryGameId());
++        intent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
++        intent.putExtra(Game.EXTRA_APP_ID, app.getAppId());
++        intent.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
++        startActivity(intent);
++    }
++
+     private void updateUiWithServerinfo(final ComputerDetails details) {
+         AppView.this.runOnUiThread(new Runnable() {
+             @Override
+diff --git a/app/src/main/java/com/limelight/InputLabActivity.java b/app/src/main/java/com/limelight/InputLabActivity.java
+new file mode 100644
+index 00000000..0d9654a6
+--- /dev/null
++++ b/app/src/main/java/com/limelight/InputLabActivity.java
+@@ -0,0 +1,205 @@
++package com.limelight;
++
++import android.app.Activity;
++import android.content.ClipData;
++import android.content.ClipboardManager;
++import android.content.Context;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.SystemClock;
++import android.view.Gravity;
++import android.view.InputDevice;
++import android.view.KeyEvent;
++import android.view.MotionEvent;
++import android.view.Window;
++import android.view.WindowManager;
++import android.widget.Button;
++import android.widget.FrameLayout;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import android.widget.Toast;
++
++import com.limelight.binding.input.ControllerHandler;
++import com.limelight.binding.input.InputLabTrace;
++import com.limelight.binding.input.virtual_controller.VirtualController;
++import com.limelight.nvstream.NvConnection;
++import com.limelight.nvstream.input.ControllerPacket;
++import com.limelight.nvstream.jni.MoonBridge;
++import com.limelight.preferences.PreferenceConfiguration;
++
++import java.util.Arrays;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++
++/** Offline diagnostic: real controller parsing and OSC views, with a non-network sink. */
++public final class InputLabActivity extends Activity {
++    private final Handler ui = new Handler(Looper.getMainLooper());
++    private final InputLabTrace trace = new InputLabTrace(128);
++    private final Map<String, String> touches = new LinkedHashMap<>();
++    private ControllerHandler input;
++    private VirtualController controller;
++    private TextView status;
++    private String lastPacket = "", packetDisplay;
++    private boolean updatePending;
++    private volatile boolean closed;
++
++    @Override protected void onCreate(Bundle state) {
++        super.onCreate(state);
++        packetDisplay = getString(R.string.nxb_input_lab_initial);
++        requestWindowFeature(Window.FEATURE_NO_TITLE);
++        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
++        FrameLayout root = new FrameLayout(this);
++        root.setBackgroundColor(0xff19251f);
++        root.setFocusableInTouchMode(true);
++        setContentView(root);
++        root.post(() -> {
++            if (isFinishing() || isDestroyed()) return;
++            LabConnection sink = new LabConnection(this);
++            input = new ControllerHandler(this, sink, () -> { }, PreferenceConfiguration.readPreferences(this));
++            controller = new VirtualController(input, root, this);
++            controller.setLayoutIdentity(getIntent().getStringExtra(Game.EXTRA_LIBRARY_GAME_ID),
++                    getIntent().getStringExtra(Game.EXTRA_PC_UUID), getIntent().getIntExtra(Game.EXTRA_APP_ID, 0),
++                    getIntent().getStringExtra(Game.EXTRA_APP_NAME));
++            controller.setTouchObserver(this::onTouchOwners);
++            controller.refreshLayout(); controller.setConfigureEnabled(false); controller.show();
++            input.setNxbLabTakeover(controller::cancelForPhysicalTakeover);
++            addPanel(root);
++            root.requestFocus();
++            record("lab", "started");
++        });
++    }
++
++    private void addPanel(FrameLayout root) {
++        LinearLayout panel = new LinearLayout(this);
++        panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(20, 12, 20, 12); panel.setBackgroundColor(0xe91a3025);
++        TextView title = new TextView(this); title.setText(R.string.nxb_input_lab_title); title.setTextColor(0xffffffff); title.setTextSize(15); panel.addView(title);
++        status = new TextView(this); status.setTextColor(0xffe3f5e6); status.setTextSize(13); status.setMaxLines(8); panel.addView(status);
++        LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER);
++        addButton(row, R.string.nxb_input_lab_clear, () -> {
++            trace.clear(); record("lab", "trace cleared");
++            String packet; synchronized (this) { packet = lastPacket; }
++            if (!packet.isEmpty()) record("input", packet);
++        });
++        addButton(row, R.string.nxb_input_lab_copy, this::copyTrace);
++        addButton(row, R.string.nxb_input_lab_close, this::finish);
++        panel.addView(row);
++        int width = Math.min((int)(getResources().getDisplayMetrics().widthPixels * 0.39f), (int)(540 * getResources().getDisplayMetrics().density));
++        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
++        p.bottomMargin = (int)(getResources().getDisplayMetrics().density * 40);
++        root.addView(panel, p); controller.setPriorityOverlay(panel);
++    }
++
++    private void addButton(LinearLayout row, int text, Runnable action) {
++        Button button = new Button(this); button.setText(text); button.setAllCaps(false); button.setOnClickListener(v -> action.run());
++        row.addView(button, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
++    }
++
++    private void record(String kind, String detail) {
++        if (closed) return;
++        trace.record(SystemClock.elapsedRealtimeNanos(), kind, detail.length() > 512 ? detail.substring(0, 512) : detail);
++        synchronized (this) {
++            if (updatePending) return;
++            updatePending = true;
++        }
++        ui.postDelayed(() -> { synchronized (InputLabActivity.this) { updatePending = false; } render(); }, 50);
++    }
++
++    private void onTouchOwners(String control, int[] ids, boolean blocked) {
++        if (ids.length == 0) touches.remove(control);
++        else touches.put(control, Arrays.toString(ids) + (blocked ? " (" + getString(R.string.nxb_input_lab_blocked) + ")" : ""));
++        record("touch", control + " " + Arrays.toString(ids) + (blocked ? " blocked" : ""));
++    }
++
++    private static String buttons(int flags, int lt, int rt) {
++        int[] masks = {ControllerPacket.A_FLAG, ControllerPacket.B_FLAG, ControllerPacket.X_FLAG, ControllerPacket.Y_FLAG,
++                ControllerPacket.LB_FLAG, ControllerPacket.RB_FLAG, ControllerPacket.UP_FLAG, ControllerPacket.DOWN_FLAG,
++                ControllerPacket.LEFT_FLAG, ControllerPacket.RIGHT_FLAG, ControllerPacket.BACK_FLAG, ControllerPacket.PLAY_FLAG,
++                ControllerPacket.LS_CLK_FLAG, ControllerPacket.RS_CLK_FLAG, ControllerPacket.SPECIAL_BUTTON_FLAG};
++        String[] names = {"A", "B", "X", "Y", "L", "R", "↑", "↓", "←", "→", "−", "+", "L3", "R3", "HOME"};
++        StringBuilder result = new StringBuilder();
++        for (int i = 0; i < masks.length; i++) if ((flags & masks[i]) != 0) { if (result.length() > 0) result.append(' '); result.append(names[i]); }
++        if (lt != 0) result.append(" ZL:").append(lt);
++        if (rt != 0) result.append(" ZR:").append(rt);
++        return result.length() == 0 ? "—" : result.toString().trim();
++    }
++
++    private void onPacket(short slot, int flags, byte lt, byte rt, short lx, short ly, short rx, short ry) {
++        String source = input == null ? "TOUCH:0" : input.nxbSourceDescription();
++        String packet = String.format(Locale.ROOT, "slot=%d source=%s buttons=%d triggers=%d,%d axes=%d,%d,%d,%d",
++                (int)slot, source, flags, lt & 255, rt & 255, (int)lx, (int)ly, (int)rx, (int)ry);
++        synchronized (this) {
++            if (packet.equals(lastPacket)) return;
++            lastPacket = packet;
++            String owner = getString(source.startsWith("PHYSICAL:") ? R.string.nxb_input_lab_physical : R.string.nxb_input_lab_touch);
++            packetDisplay = getString(R.string.nxb_input_lab_state, owner, (int)slot, buttons(flags, lt & 255, rt & 255), (int)lx, (int)ly, (int)rx, (int)ry);
++        }
++        record("input", packet);
++    }
++
++    private void render() {
++        if (closed || status == null) return;
++        String display; synchronized (this) { display = packetDisplay; }
++        StringBuilder output = new StringBuilder(display).append('\n').append(getString(R.string.nxb_input_lab_owners)).append(' ');
++        if (touches.isEmpty()) output.append("—");
++        else for (Map.Entry<String, String> entry : touches.entrySet()) output.append(entry.getKey()).append(':').append(entry.getValue()).append(' ');
++        List<InputLabTrace.Entry> recent = trace.snapshot();
++        for (int i = Math.max(0, recent.size() - 3); i < recent.size(); i++) {
++            InputLabTrace.Entry e = recent.get(i); output.append("\n#").append(e.sequence).append(' ').append(e.kind).append(' ').append(e.detail);
++        }
++        status.setText(output.toString());
++    }
++
++    private void copyTrace() {
++        StringBuilder output = new StringBuilder("NXBridge input lab v1 · monotonic nanoseconds · local events only\n");
++        for (InputLabTrace.Entry e : trace.snapshot()) output.append(e.sequence).append(' ').append(e.monotonicNanos).append(' ').append(e.kind).append(' ').append(e.detail).append('\n');
++        ClipboardManager clipboard = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
++        clipboard.setPrimaryClip(ClipData.newPlainText("NXBridge input trace", output.toString()));
++        Toast.makeText(this, R.string.nxb_input_lab_copied, Toast.LENGTH_SHORT).show();
++    }
++
++    @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
++        if (input != null && ControllerHandler.isGameControllerDevice(event.getDevice()) && input.handleButtonDown(event)) return true;
++        return super.onKeyDown(keyCode, event);
++    }
++    @Override public boolean onKeyUp(int keyCode, KeyEvent event) {
++        if (input != null && ControllerHandler.isGameControllerDevice(event.getDevice()) && input.handleButtonUp(event)) return true;
++        return super.onKeyUp(keyCode, event);
++    }
++    @Override public boolean onGenericMotionEvent(MotionEvent event) {
++        if (input != null && (event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK && input.handleMotionEvent(event)) return true;
++        return super.onGenericMotionEvent(event);
++    }
++    @Override protected void onResume() { super.onResume(); if (input != null) input.setLayoutInputSuppressed(false); }
++    @Override protected void onPause() {
++        if (input != null) input.setLayoutInputSuppressed(true);
++        if (controller != null) controller.cancelForPhysicalTakeover();
++        super.onPause();
++    }
++    @Override protected void onDestroy() {
++        closed = true;
++        if (controller != null) controller.onHostDestroyed();
++        if (input != null) input.destroy();
++        ui.removeCallbacksAndMessages(null);
++        super.onDestroy();
++    }
++
++    /** Every ControllerHandler output is intercepted; no method calls the native network bridge. */
++    private final class LabConnection extends NvConnection {
++        LabConnection(Context context) { super(context.getApplicationContext(), null, 0, "local-lab", null, null, null); }
++        @Override public void sendControllerInput(short slot, short mask, int flags, byte lt, byte rt, short lx, short ly, short rx, short ry) { onPacket(slot, flags, lt, rt, lx, ly, rx, ry); }
++        @Override public int sendControllerArrivalEvent(byte slot, short mask, byte type, int flags, short caps) { record("device", "arrival slot=" + slot); return 0; }
++        @Override public int sendControllerTouchEvent(byte slot, byte type, int pointer, float x, float y, float pressure) { return MoonBridge.LI_ERR_UNSUPPORTED; }
++        @Override public int sendControllerMotionEvent(byte slot, byte type, float x, float y, float z) { return MoonBridge.LI_ERR_UNSUPPORTED; }
++        @Override public void sendControllerBatteryEvent(byte slot, byte state, byte percent) { }
++        @Override public void sendMouseButtonDown(byte button) { }
++        @Override public void sendMouseButtonUp(byte button) { }
++        @Override public void sendMouseScroll(byte clicks) { }
++        @Override public void sendMouseHScroll(byte clicks) { }
++        @Override public void sendMouseMove(short x, short y) { }
++        @Override public void sendMouseHighResScroll(short clicks) { }
++        @Override public void sendMouseHighResHScroll(short clicks) { }
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+index 760ebcb2..775d4a0f 100644
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -117,6 +117,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     private final InputDeviceContext defaultContext = new InputDeviceContext();
+     private final InputDeviceContext oscContext = new InputDeviceContext();
+     private final SourceArbiter nxbSources = new SourceArbiter();
++    private Runnable nxbLabTakeover;
++    public synchronized void setNxbLabTakeover(Runnable callback) { nxbLabTakeover = callback; }
++    public synchronized String nxbSourceDescription() { return nxbSources.owner().name() + ":" + nxbSources.generation(); }
+     private final GameGestures gestures;
+     private final InputManager inputManager;
+     private final Vibrator deviceVibrator;
+@@ -1311,8 +1314,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+                     final long generation = nxbSources.generation();
+                     activityContext.runOnUiThread(() -> {
+                         synchronized (ControllerHandler.this) {
+-                            if (nxbSources.owner() == SourceArbiter.Source.PHYSICAL && nxbSources.generation() == generation && activityContext instanceof com.limelight.Game)
+-                                ((com.limelight.Game)activityContext).nxbPhysicalInputTakeover();
++                            if (nxbSources.owner() == SourceArbiter.Source.PHYSICAL && nxbSources.generation() == generation) {
++                                if (activityContext instanceof com.limelight.Game)
++                                    ((com.limelight.Game)activityContext).nxbPhysicalInputTakeover();
++                                else if (nxbLabTakeover != null) nxbLabTakeover.run();
++                            }
+                         }
+                     });
+                 }
+diff --git a/app/src/main/java/com/limelight/binding/input/InputLabTrace.java b/app/src/main/java/com/limelight/binding/input/InputLabTrace.java
+new file mode 100644
+index 00000000..6af5030d
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/InputLabTrace.java
+@@ -0,0 +1,30 @@
++package com.limelight.binding.input;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Bounded, in-memory diagnostic events; no wall-clock time or game content. */
++public final class InputLabTrace {
++    public static final class Entry {
++        public final long sequence, monotonicNanos;
++        public final String kind, detail;
++        Entry(long sequence, long monotonicNanos, String kind, String detail) {
++            this.sequence = sequence; this.monotonicNanos = monotonicNanos; this.kind = kind; this.detail = detail;
++        }
++    }
++    private final int capacity;
++    private final ArrayDeque<Entry> entries = new ArrayDeque<>();
++    private long nextSequence = 1;
++    public InputLabTrace(int capacity) {
++        if (capacity < 1 || capacity > 1024) throw new IllegalArgumentException("invalid trace capacity");
++        this.capacity = capacity;
++    }
++    public synchronized void record(long monotonicNanos, String kind, String detail) {
++        if (kind == null || detail == null || kind.length() > 40 || detail.length() > 512) throw new IllegalArgumentException("invalid trace event");
++        if (entries.size() == capacity) entries.removeFirst();
++        entries.addLast(new Entry(nextSequence++, monotonicNanos, kind, detail));
++    }
++    public synchronized List<Entry> snapshot() { return new ArrayList<>(entries); }
++    public synchronized void clear() { entries.clear(); }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+index e2ea16f0..e56ae993 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -100,6 +100,21 @@ public class VirtualController {
+     private boolean layoutInitialized;
+     private LayoutSafeArea safeArea;
+     private View safeAreaOutline;
++    private View priorityOverlay;
++    public void setPriorityOverlay(View view) { priorityOverlay = view; if (view != null) view.bringToFront(); }
++    public interface TouchObserver { void onTouchOwners(String control, int[] pointers, boolean blocked); }
++    private TouchObserver touchObserver;
++    private boolean configureEnabled = true;
++    public void setTouchObserver(TouchObserver observer) { touchObserver = observer; }
++    boolean observesTouches() { return touchObserver != null; }
++    void reportTouchOwners(VirtualControllerElement element, int[] pointers, boolean blocked) {
++        if (touchObserver == null) return;
++        String name = element instanceof DigitalButton ? ((DigitalButton)element).getLabel() :
++                element.elementId == VirtualControllerElement.EID_LS ? context.getString(R.string.nxb_layout_left_stick) :
++                element.elementId == VirtualControllerElement.EID_RS ? context.getString(R.string.nxb_layout_right_stick) : context.getString(R.string.nxb_layout_dpad);
++        touchObserver.onTouchOwners(name, pointers, blocked);
++    }
++    public void setConfigureEnabled(boolean enabled) { configureEnabled = enabled; buttonConfigure.setVisibility(enabled && controlsShown ? View.VISIBLE : View.INVISIBLE); }
+     private boolean geometryChangedWhileSaving;
+     private HashMap<String, JSONObject> beforeEdit;
+     private HashMap<String, JSONObject> undoEdit;
+@@ -173,7 +188,7 @@ public class VirtualController {
+             if (element.isControlEnabled()) element.setVisibility(View.VISIBLE);
+         }
+ 
+-        buttonConfigure.setVisibility(View.VISIBLE);
++        buttonConfigure.setVisibility(configureEnabled ? View.VISIBLE : View.INVISIBLE);
+     }
+ 
+     public void removeElements() {
+@@ -273,6 +288,7 @@ public class VirtualController {
+             Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show();
+         }
+         buttonConfigure.bringToFront(); refreshElementVisibility();
++        if (priorityOverlay != null && priorityOverlay.getParent() == frame_layout) priorityOverlay.bringToFront();
+         layoutInitialized = true;
+         if (!controlsShown) hide();
+     }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+index 2b91903c..47f519a9 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -17,6 +17,7 @@ import android.widget.FrameLayout;
+ 
+ import org.json.JSONException;
+ import org.json.JSONObject;
++import java.util.TreeSet;
+ 
+ public abstract class VirtualControllerElement extends View {
+     protected static boolean _PRINT_DEBUG_INFORMATION = false;
+@@ -78,7 +79,23 @@ public abstract class VirtualControllerElement extends View {
+     }
+     @Override protected void onDetachedFromWindow() { removeCallbacks(nxbFade); animate().cancel(); super.onDetachedFromWindow(); }
+     private boolean nxbIgnoreUntilRelease;
+-    void blockHeldTouch() { if (nxbTouchActive) nxbIgnoreUntilRelease = true; }
++    private final TreeSet<Integer> nxbObservedPointers = new TreeSet<>();
++    private void reportOwners() {
++        if (!virtualController.observesTouches()) return;
++        int[] ids = new int[nxbObservedPointers.size()]; int i = 0;
++        for (Integer id : nxbObservedPointers) ids[i++] = id;
++        virtualController.reportTouchOwners(this, ids, nxbIgnoreUntilRelease);
++    }
++    private void updateOwners(MotionEvent event) {
++        if (!virtualController.observesTouches()) return;
++        int action = event.getActionMasked();
++        if (action == MotionEvent.ACTION_DOWN) nxbObservedPointers.clear();
++        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) nxbObservedPointers.add(event.getPointerId(event.getActionIndex()));
++        else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) nxbObservedPointers.remove(event.getPointerId(event.getActionIndex()));
++        else if (action == MotionEvent.ACTION_CANCEL) nxbObservedPointers.clear();
++        if (action != MotionEvent.ACTION_MOVE) reportOwners();
++    }
++    void blockHeldTouch() { if (nxbTouchActive) { nxbIgnoreUntilRelease = true; reportOwners(); } }
+ 
+     protected VirtualControllerElement(VirtualController controller, Context context, int elementId) {
+         super(context);
+@@ -245,6 +262,7 @@ public abstract class VirtualControllerElement extends View {
+ 
+     @Override
+     public boolean onTouchEvent(MotionEvent event) {
++        updateOwners(event);
+         // Ignore secondary touches on controls
+         //
+         // NB: We can get an additional pointer down if the user touches a non-StreamView area
+@@ -260,6 +278,7 @@ public abstract class VirtualControllerElement extends View {
+             cancel.setAction(MotionEvent.ACTION_CANCEL);
+             onElementTouchEvent(cancel); cancel.recycle();
+             nxbTouchActive = false; nxbIgnoreUntilRelease = true;
++            reportOwners();
+             return true;
+         }
+         if (action == MotionEvent.ACTION_DOWN) { nxbTouchActive = true; removeCallbacks(nxbFade); animate().cancel(); setAlpha(1f); }
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index f143048c..d9f48ace 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -304,6 +304,18 @@
+     <string name="nxb_layout_save_failed">保存失败，草稿仍保留</string>
+     <string name="nxb_layout_saved">布局已保存</string>
+     <string name="nxb_layout_entry">控制布局</string>
++    <string name="nxb_input_lab">输入工作台</string>
++    <string name="nxb_input_lab_title">输入工作台 · 仅本机，不连接游戏</string>
++    <string name="nxb_input_lab_clear">清空记录</string>
++    <string name="nxb_input_lab_copy">复制记录</string>
++    <string name="nxb_input_lab_close">关闭</string>
++    <string name="nxb_input_lab_copied">输入记录已复制</string>
++    <string name="nxb_input_lab_touch">触屏</string>
++    <string name="nxb_input_lab_physical">实体手柄</string>
++    <string name="nxb_input_lab_blocked">已屏蔽</string>
++    <string name="nxb_input_lab_owners">触点归属</string>
++    <string name="nxb_input_lab_initial">来源 触屏 · 手柄 0\n按键 —\n左杆 0,0   右杆 0,0</string>
++    <string name="nxb_input_lab_state">来源 %1$s · 手柄 %2$d\n按键 %3$s\n左杆 %4$d,%5$d   右杆 %6$d,%7$d</string>
+     <string name="nxb_layout_preview">布局预览，不操作游戏</string>
+     <string name="nxb_layout_display_changed">屏幕尺寸已变化，未保存的布局没有应用</string>
+     <string name="nxb_layout_safe_adjusted">布局已临时适配安全区域；保存后生效，原文件未改动</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 782fb186..d84ad87f 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -323,6 +323,18 @@
+     <string name="nxb_layout_save_failed">Could not save layout; your draft is still open</string>
+     <string name="nxb_layout_saved">Layout saved</string>
+     <string name="nxb_layout_entry">Control layout</string>
++    <string name="nxb_input_lab">Input lab</string>
++    <string name="nxb_input_lab_title">Input lab · local only, no game connection</string>
++    <string name="nxb_input_lab_clear">Clear trace</string>
++    <string name="nxb_input_lab_copy">Copy trace</string>
++    <string name="nxb_input_lab_close">Close</string>
++    <string name="nxb_input_lab_copied">Input trace copied</string>
++    <string name="nxb_input_lab_touch">Touch</string>
++    <string name="nxb_input_lab_physical">Physical controller</string>
++    <string name="nxb_input_lab_blocked">blocked</string>
++    <string name="nxb_input_lab_owners">Touch owners</string>
++    <string name="nxb_input_lab_initial">Source Touch · Controller 0\nButtons —\nLeft 0,0   Right 0,0</string>
++    <string name="nxb_input_lab_state">Source %1$s · Controller %2$d\nButtons %3$s\nLeft %4$d,%5$d   Right %6$d,%7$d</string>
+     <string name="nxb_layout_preview">Layout preview · no game input</string>
+     <string name="nxb_layout_display_changed">Display changed; unsaved layout was not applied</string>
+     <string name="nxb_layout_safe_adjusted">Layout adjusted for the safe area. Save to keep these changes; the original file is unchanged.</string>

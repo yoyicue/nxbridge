@@ -1,5 +1,6 @@
 //! Bounded local catalog metadata; game resources and saves are never modified.
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
@@ -173,9 +174,9 @@ impl Catalog {
         Self::parse(text)
     }
     pub fn json(&self) -> String {
-        self.json_with_access(false)
+        self.json_with_access(false, None)
     }
-    fn json_with_access(&self, writable: bool) -> String {
+    fn json_with_access(&self, writable: bool, cover_dir: Option<&Path>) -> String {
         let games = self.games.iter().map(|game| {
             let builds = game.builds.iter().map(|build| {
                 let capabilities = build.capabilities.fields().iter()
@@ -187,7 +188,10 @@ impl Catalog {
                 format!("{{\"id\":{},\"version\":{},\"status\":\"{}\",\"evidence\":{},\"directory_bound\":{},\"directory_accessible\":{},\"capabilities\":{{{}}}}}",
                     json_string(&build.id), json_string(&build.version), build.status.value(), evidence, bound, accessible, capabilities)
             }).collect::<Vec<_>>().join(",");
-            format!("{{\"id\":{},\"name\":{},\"builds\":[{}]}}", json_string(&game.id), json_string(&game.name), builds)
+            let cover = cover_dir.and_then(|dir| fs::read(dir.join(format!("{}.png", game.id))).ok())
+                .map(|bytes| json_string(&hex::encode(Sha256::digest(bytes))))
+                .unwrap_or_else(|| "null".into());
+            format!("{{\"id\":{},\"name\":{},\"cover_version\":{},\"builds\":[{}]}}", json_string(&game.id), json_string(&game.name), cover, builds)
         }).collect::<Vec<_>>().join(",");
         format!(
             "{{\"api_version\":1,\"mode\":\"local_experiment\",\"revision\":{},\"write_enabled\":{},\"games\":[{}]}}",
@@ -285,7 +289,76 @@ impl CatalogStore {
     }
     pub fn json(&self) -> Result<String, StoreError> {
         let state = self.state.lock().map_err(|_| StoreError::Io)?;
-        Ok(state.catalog.json_with_access(self.path.is_some()))
+        let cover_dir = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("covers"));
+        Ok(state
+            .catalog
+            .json_with_access(self.path.is_some(), cover_dir.as_deref()))
+    }
+    pub fn cover(&self, id: &str) -> Result<Vec<u8>, StoreError> {
+        let path = self.path.as_ref().ok_or(StoreError::ReadOnly)?;
+        let state = self.state.lock().map_err(|_| StoreError::Io)?;
+        if !valid_id(id) || !state.catalog.games.iter().any(|g| g.id == id) {
+            return Err(StoreError::Invalid);
+        }
+        fs::read(
+            path.parent()
+                .ok_or(StoreError::Io)?
+                .join("covers")
+                .join(format!("{id}.png")),
+        )
+        .map_err(|_| StoreError::Invalid)
+    }
+    pub fn set_cover(&self, id: &str, expected: &str, bytes: &[u8]) -> Result<String, StoreError> {
+        let path = self.path.as_ref().ok_or(StoreError::ReadOnly)?;
+        let state = self.state.lock().map_err(|_| StoreError::Io)?;
+        if !valid_id(id)
+            || !state.catalog.games.iter().any(|g| g.id == id)
+            || bytes.len() >= 5 * 1024 * 1024
+            || bytes.len() < 33
+            || &bytes[..8] != b"\x89PNG\r\n\x1a\n"
+            || &bytes[12..16] != b"IHDR"
+        {
+            return Err(StoreError::Invalid);
+        }
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return Err(StoreError::Invalid);
+        }
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_limits(png::Limits {
+            bytes: 80 * 1024 * 1024,
+        });
+        let mut reader = decoder.read_info().map_err(|_| StoreError::Invalid)?;
+        let size = reader.output_buffer_size().ok_or(StoreError::Invalid)?;
+        if size > 80 * 1024 * 1024 {
+            return Err(StoreError::Invalid);
+        }
+        reader
+            .next_frame(&mut vec![0; size])
+            .map_err(|_| StoreError::Invalid)?;
+        if fs::read(path).map_err(|_| StoreError::Io)? != state.source {
+            return Err(StoreError::Conflict);
+        }
+        let dir = path.parent().ok_or(StoreError::Io)?.join("covers");
+        fs::create_dir_all(&dir).map_err(|_| StoreError::Io)?;
+        let dest = dir.join(format!("{id}.png"));
+        let current = fs::read(&dest)
+            .ok()
+            .map(|data| hex::encode(Sha256::digest(data)))
+            .unwrap_or_default();
+        if current != expected {
+            return Err(StoreError::Conflict);
+        }
+        let version = hex::encode(Sha256::digest(bytes));
+        if version != current {
+            atomic_write(&dest, bytes)?;
+        }
+        Ok(version)
     }
     pub fn apply_toml(&self, text: &str) -> Result<u64, StoreError> {
         if text.len() > 8192 {

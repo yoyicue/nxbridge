@@ -1,0 +1,121 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 391
++        versionCode = 393
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -81,17 +81,20 @@
+     @Override protected void onDetachedFromWindow() { removeCallbacks(nxbFade); animate().cancel(); super.onDetachedFromWindow(); }
+     private boolean nxbIgnoreUntilRelease;
+     private final TreeSet<Integer> nxbObservedPointers = new TreeSet<>();
++    private final ButtonTouchOwners nxbButtonOwners = new ButtonTouchOwners();
+     private void reportOwners() {
+         if (!virtualController.observesTouches()) return;
+-        int[] ids = new int[nxbObservedPointers.size()]; int i = 0;
+-        for (Integer id : nxbObservedPointers) ids[i++] = id;
++        int[] ids;
++        if (this instanceof DigitalButton && (virtualController.getControllerMode() == VirtualController.ControllerMode.Active ||
++                virtualController.getControllerMode() == VirtualController.ControllerMode.TestButtons)) ids = nxbButtonOwners.ids();
++        else { ids = new int[nxbObservedPointers.size()]; int i = 0; for (Integer id : nxbObservedPointers) ids[i++] = id; }
+         virtualController.reportTouchOwners(this, ids, nxbIgnoreUntilRelease);
+     }
+     private void updateOwners(MotionEvent event) {
+         if (!virtualController.observesTouches()) return;
+         int action = event.getActionMasked();
+         if (action == MotionEvent.ACTION_DOWN) nxbObservedPointers.clear();
+-        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) nxbObservedPointers.add(event.getPointerId(event.getActionIndex()));
++        if (action == MotionEvent.ACTION_DOWN || (action == MotionEvent.ACTION_POINTER_DOWN && !(this instanceof AnalogStick) && !(this instanceof DigitalPad))) nxbObservedPointers.add(event.getPointerId(event.getActionIndex()));
+         else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) nxbObservedPointers.remove(event.getPointerId(event.getActionIndex()));
+         else if (action == MotionEvent.ACTION_CANCEL) nxbObservedPointers.clear();
+         if (action != MotionEvent.ACTION_MOVE) reportOwners();
+@@ -263,8 +266,51 @@
+         alert.show();
+     }
+ 
++    private boolean onDigitalButtonTouch(MotionEvent event) {
++        int action = event.getActionMasked();
++        int index = event.getActionIndex();
++        if (action == MotionEvent.ACTION_DOWN) nxbButtonOwners.cancel();
++        boolean pressed = false, released = false;
++        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
++            boolean inside = event.getX(index) >= 0 && event.getX(index) < getWidth() &&
++                    event.getY(index) >= 0 && event.getY(index) < getHeight();
++            if (!nxbIgnoreUntilRelease && !virtualController.isSaving())
++                pressed = nxbButtonOwners.down(event.getPointerId(index), inside);
++        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
++            released = nxbButtonOwners.up(event.getPointerId(index));
++        } else if (action == MotionEvent.ACTION_CANCEL) {
++            released = nxbButtonOwners.cancel();
++        }
++        if (virtualController.observesTouches() && action != MotionEvent.ACTION_MOVE)
++            virtualController.reportTouchOwners(this, nxbButtonOwners.ids(), nxbIgnoreUntilRelease);
++        if (nxbIgnoreUntilRelease) {
++            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
++                nxbIgnoreUntilRelease = false; nxbTouchActive = false; nxbButtonOwners.cancel();
++                if (virtualController.observesTouches()) virtualController.reportTouchOwners(this, nxbButtonOwners.ids(), false);
++            }
++            return true;
++        }
++        if (pressed) {
++            nxbTouchActive = true; removeCallbacks(nxbFade); animate().cancel(); setAlpha(1f);
++            if (virtualController.getControllerMode() == VirtualController.ControllerMode.Active) virtualController.claimTouchInput();
++        }
++        if (pressed || released) {
++            MotionEvent synthetic = MotionEvent.obtain(event);
++            synthetic.setAction(pressed ? MotionEvent.ACTION_DOWN :
++                    (action == MotionEvent.ACTION_CANCEL ? MotionEvent.ACTION_CANCEL : MotionEvent.ACTION_UP));
++            boolean accepted = onElementTouchEvent(synthetic); synthetic.recycle();
++            if (pressed && accepted && virtualController.localHapticsEnabled()) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
++            if (released) { nxbTouchActive = false; refreshIdleVisibility(); }
++        }
++        return true;
++    }
++
+     @Override
+     public boolean onTouchEvent(MotionEvent event) {
++        if (this instanceof DigitalButton &&
++                (virtualController.getControllerMode() == VirtualController.ControllerMode.Active ||
++                 virtualController.getControllerMode() == VirtualController.ControllerMode.TestButtons))
++            return onDigitalButtonTouch(event);
+         updateOwners(event);
+         // Ignore secondary touches on controls
+         //
+@@ -275,7 +321,7 @@
+             return true;
+         }
+         int action = event.getActionMasked();
+-        if (this instanceof AnalogStick && action == MotionEvent.ACTION_POINTER_UP) {
++        if ((this instanceof AnalogStick || this instanceof DigitalPad) && action == MotionEvent.ACTION_POINTER_UP) {
+             // The first pointer owns the stick. Never promote another held finger.
+             MotionEvent cancel = MotionEvent.obtain(event);
+             cancel.setAction(MotionEvent.ACTION_CANCEL);
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/ButtonTouchOwners.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/ButtonTouchOwners.java
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/ButtonTouchOwners.java
+@@ -0,0 +1,16 @@
++package com.limelight.binding.input.virtual_controller;
++
++import java.util.TreeSet;
++
++/** Tracks only fingers that began within this button. */
++final class ButtonTouchOwners {
++    private final TreeSet<Integer> ids = new TreeSet<>();
++    boolean down(int id, boolean inside) {
++        boolean wasEmpty = ids.isEmpty();
++        if (inside) ids.add(id);
++        return inside && wasEmpty && !ids.isEmpty();
++    }
++    boolean up(int id) { return ids.remove(id) && ids.isEmpty(); }
++    boolean cancel() { boolean held = !ids.isEmpty(); ids.clear(); return held; }
++    int[] ids() { int[] result = new int[ids.size()]; int i = 0; for (int id : ids) result[i++] = id; return result; }
++}

@@ -1,0 +1,41 @@
+--- a/vendor/moonshine-core/src/session/stream/control/host_input.rs
++++ b/vendor/moonshine-core/src/session/stream/control/host_input.rs
+@@ -34,6 +34,16 @@
+     }
+ 
+     pub(crate) fn forward(&self, payload: &[u8]) {
++        if std::env::var_os("NXB_STAGE_TRACE").is_some() && payload.len() >= 24 &&
++            matches!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 0x0c | 0x0d) &&
++            u16::from_le_bytes(payload[6..8].try_into().unwrap()) == 0 {
++            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++            if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
++                let active = u16::from_le_bytes(payload[8..10].try_into().unwrap()) & 1 != 0;
++                let zl = active && payload[14] >= 128;
++                eprintln!("NXB_STAGE arrive {} {}", ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64, zl as u8);
++            }
++        }
+         let epoch = *self.overflow.borrow();
+         match self.tx.try_send(InputPacket { epoch, payload: payload.to_vec() }) {
+             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {},
+--- a/crates/nxbridge-gamestream/src/game_input.rs
++++ b/crates/nxbridge-gamestream/src/game_input.rs
+@@ -108,7 +108,19 @@
+         }
+         seq += 1;
+         let outgoing = if force_reset { force_reset = false; reset_packet(seq) } else { packet(seq, current) };
++        if std::env::var_os("NXB_STAGE_TRACE").is_some() {
++            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++            if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
++                eprintln!("NXB_STAGE send_start {} {} {}", ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64, seq, current.buttons);
++            }
++        }
+         tokio::time::timeout(Duration::from_millis(500), stream.write_all(&outgoing)).await??;
++        if std::env::var_os("NXB_STAGE_TRACE").is_some() {
++            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++            if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
++                eprintln!("NXB_STAGE sent {} {} {}", ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64, seq, current.buttons);
++            }
++        }
+     }
+     seq += 1;
+     let _ = tokio::time::timeout(

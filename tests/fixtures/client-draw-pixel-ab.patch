@@ -1,0 +1,40 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 387
++        versionCode = 388
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -43,6 +43,8 @@
+     protected final int elementId;
+ 
+     private final Paint paint = new Paint();
++    private final boolean nxbBenchmarkBaseline;
++    private final Paint nxbBenchmarkPixel = new Paint();
+ 
+     private int normalColor = 0xF0F3F7FA;
+     protected int pressedColor = 0xF06CE5F1;
+@@ -100,6 +102,8 @@
+ 
+     protected VirtualControllerElement(VirtualController controller, Context context, int elementId) {
+         super(context);
++        nxbBenchmarkBaseline = android.preference.PreferenceManager.getDefaultSharedPreferences(context).getBoolean("nxb_benchmark_pixel_baseline", false);
++        nxbBenchmarkPixel.setColor(0xff00ff00);
+ 
+         this.virtualController = controller;
+         this.elementId = elementId;
+@@ -137,6 +141,8 @@
+ 
+     @Override
+     protected void onDraw(Canvas canvas) {
++        // Diagnostic baseline: retain one primitive for HWUI frame accounting.
++        if (nxbBenchmarkBaseline) { canvas.drawRect(0, 0, 1, 1, nxbBenchmarkPixel); return; }
+         onElementDraw(canvas);
+ 
+         if (currentMode != Mode.Normal || virtualController.faceGroupSelected(this)) {

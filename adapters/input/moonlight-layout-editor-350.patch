@@ -1,0 +1,2015 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 64d60ae..14264cb 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 331
++        versionCode = 350
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index d916899..5254482 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -143,6 +143,8 @@
+             <meta-data android:name="WindowManagerPreference:FreeformWindowSize" android:value="system-default" />
+             <meta-data android:name="WindowManagerPreference:FreeformWindowOrientation" android:value="landscape" />
+         </activity>
++        <activity android:name=".LayoutEditorActivity" android:screenOrientation="userLandscape"
++            android:exported="false" android:theme="@style/StreamTheme" />
+         <activity
+             android:name=".Game"
+             android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection"
+diff --git a/app/src/main/java/com/limelight/AppView.java b/app/src/main/java/com/limelight/AppView.java
+index 5e6d3d2..3faa275 100644
+--- a/app/src/main/java/com/limelight/AppView.java
++++ b/app/src/main/java/com/limelight/AppView.java
+@@ -70,6 +70,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+     private final static int VIEW_DETAILS_ID = 5;
+     private final static int CREATE_SHORTCUT_ID = 6;
+     private final static int HIDE_APP_ID = 7;
++    private final static int EDIT_LAYOUT_ID = 8;
+ 
+     public final static String HIDDEN_APPS_PREF_FILENAME = "HiddenApps";
+ 
+@@ -415,6 +416,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+         }
+ 
+         menu.add(Menu.NONE, VIEW_DETAILS_ID, 4, getResources().getString(R.string.applist_menu_details));
++        menu.add(Menu.NONE, EDIT_LAYOUT_ID, 5, getResources().getString(R.string.nxb_layout_entry));
+ 
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+             // Only add an option to create shortcut if box art is loaded
+@@ -476,6 +478,9 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+                 }, null);
+                 return true;
+ 
++            case EDIT_LAYOUT_ID:
++                openLayoutEditor(app.app);
++                return true;
+             case VIEW_DETAILS_ID:
+                 Dialog.displayDialog(AppView.this, getResources().getString(R.string.title_details), app.app.toString(), false);
+                 return true;
+@@ -505,6 +510,15 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+         }
+     }
+ 
++    public void openLayoutEditor(NvApp app) {
++        Intent intent = new Intent(this, LayoutEditorActivity.class);
++        intent.putExtra(Game.EXTRA_LIBRARY_GAME_ID, app.getLibraryGameId());
++        intent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
++        intent.putExtra(Game.EXTRA_APP_ID, app.getAppId());
++        intent.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
++        startActivity(intent);
++    }
++
+     private void updateUiWithServerinfo(final ComputerDetails details) {
+         AppView.this.runOnUiThread(new Runnable() {
+             @Override
+@@ -564,6 +578,10 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
+                                 updated = true;
+                             }
+ 
++                            if (!existingApp.app.getLibraryGameId().equals(app.getLibraryGameId())) {
++                                existingApp.app.setLibraryGameId(app.getLibraryGameId());
++                                updated = true;
++                            }
+                             if (!existingApp.app.getCoverVersion().equals(app.getCoverVersion())) {
+                                 existingApp.app.setCoverVersion(app.getCoverVersion());
+                                 appGridAdapter.invalidateArtCache();
+diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
+index 223a91d..d339e96 100644
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -86,6 +86,7 @@ import java.security.cert.CertificateException;
+ import java.security.cert.CertificateFactory;
+ import java.security.cert.X509Certificate;
+ import java.util.Locale;
++import java.util.HashSet;
+ 
+ 
+ public class Game extends Activity implements SurfaceHolder.Callback,
+@@ -93,6 +94,30 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         OnSystemUiVisibilityChangeListener, GameGestures, StreamView.InputCallbacks,
+         PerfOverlayListener, UsbDriverService.UsbDriverStateListener, View.OnKeyListener {
+     private int lastButtonState = 0;
++    private final HashSet<Integer> nxbActiveTouches = new HashSet<>();
++    private final HashSet<Integer> nxbBlockedTouches = new HashSet<>();
++    private boolean nxbEditing() { return virtualController != null && virtualController.isEditing(); }
++
++    @Override public boolean dispatchTouchEvent(MotionEvent event) {
++        int action = event.getActionMasked();
++        int id = event.getPointerId(event.getActionIndex());
++        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) nxbActiveTouches.add(id);
++        try { return super.dispatchTouchEvent(event); }
++        finally {
++            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
++                nxbActiveTouches.remove(id); nxbBlockedTouches.remove(id);
++            } else if (action == MotionEvent.ACTION_CANCEL) {
++                nxbActiveTouches.clear(); nxbBlockedTouches.clear();
++            }
++        }
++    }
++    public void nxbPhysicalInputTakeover() {
++        if (virtualController != null) virtualController.cancelForPhysicalTakeover();
++    }
++    public void nxbLayoutEditStarting() {
++        nxbBlockedTouches.addAll(nxbActiveTouches);
++        for (TouchContext touch : touchContextMap) if (touch != null) touch.cancelTouch();
++    }
+ 
+     // Only 2 touches are supported
+     private final TouchContext[] touchContextMap = new TouchContext[2];
+@@ -180,6 +205,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+     public static final String EXTRA_HTTPS_PORT = "HttpsPort";
+     public static final String EXTRA_APP_NAME = "AppName";
+     public static final String EXTRA_APP_ID = "AppId";
++    public static final String EXTRA_LIBRARY_GAME_ID = "NXBridgeGameId";
+     public static final String EXTRA_UNIQUEID = "UniqueId";
+     public static final String EXTRA_PC_UUID = "UUID";
+     public static final String EXTRA_PC_NAME = "PcName";
+@@ -324,6 +350,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         byte[] derCertData = Game.this.getIntent().getByteArrayExtra(EXTRA_SERVER_CERT);
+ 
+         app = new NvApp(appName != null ? appName : "app", appId, appSupportsHdr);
++        app.setLibraryGameId(getIntent().getStringExtra(EXTRA_LIBRARY_GAME_ID));
+ 
+         X509Certificate serverCert = null;
+         try {
+@@ -515,6 +542,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+             virtualController = new VirtualController(controllerHandler,
+                     (FrameLayout)streamView.getParent(),
+                     this);
++            virtualController.setLayoutIdentity(getIntent().getStringExtra(EXTRA_LIBRARY_GAME_ID),
++                    getIntent().getStringExtra(EXTRA_PC_UUID), appId, appName);
+             virtualController.refreshLayout();
+             virtualController.hide();
+             nxbLoading.bringToFront();
+@@ -640,8 +669,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+         setPreferredOrientationForCurrentDisplay();
+ 
+         if (virtualController != null) {
+-            // Refresh layout of OSC for possible new screen size
+-            virtualController.refreshLayout();
++            virtualController.onDisplayChanged();
+             if (nxbLoading != null && nxbLoading.getVisibility() == View.VISIBLE) {
+                 virtualController.hide();
+                 nxbLoading.bringToFront();
+@@ -1388,6 +1416,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+ 
+     @Override
+     public boolean handleKeyDown(KeyEvent event) {
++        if (nxbEditing()) {
++            if (ControllerHandler.isGameControllerDevice(event.getDevice())) controllerHandler.handleButtonDown(event);
++            return true;
++        }
+         // Pass-through virtual navigation keys
+         if ((event.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
+             return false;
+@@ -1470,6 +1502,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+ 
+     @Override
+     public boolean handleKeyUp(KeyEvent event) {
++        if (nxbEditing()) {
++            if (ControllerHandler.isGameControllerDevice(event.getDevice())) controllerHandler.handleButtonUp(event);
++            return true;
++        }
+         // Pass-through virtual navigation keys
+         if ((event.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
+             return false;
+@@ -1845,6 +1881,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+     // Returns true if the event was consumed
+     // NB: View is only present if called from a view callback
+     private boolean handleMotionEvent(View view, MotionEvent event) {
++        if (nxbEditing()) {
++            if ((event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) controllerHandler.handleMotionEvent(event);
++            return true;
++        }
++        if (!nxbBlockedTouches.isEmpty() && (event.getSource() & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN) return true;
+         // Pass through mouse/touch/joystick input if we're not grabbing
+         if (!grabbedInput) {
+             return false;
+@@ -2646,11 +2687,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+ 
+     @Override
+     public void mouseMove(int deltaX, int deltaY) {
++        if (nxbEditing()) return;
+         conn.sendMouseMove((short) deltaX, (short) deltaY);
+     }
+ 
+     @Override
+     public void mouseButtonEvent(int buttonId, boolean down) {
++        if (nxbEditing()) return;
+         byte buttonIndex;
+ 
+         switch (buttonId)
+@@ -2685,16 +2728,19 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+ 
+     @Override
+     public void mouseVScroll(byte amount) {
++        if (nxbEditing()) return;
+         conn.sendMouseScroll(amount);
+     }
+ 
+     @Override
+     public void mouseHScroll(byte amount) {
++        if (nxbEditing()) return;
+         conn.sendMouseHScroll(amount);
+     }
+ 
+     @Override
+     public void keyboardEvent(boolean buttonDown, short keyCode) {
++        if (nxbEditing()) return;
+         short keyMap = keyboardTranslator.translate(keyCode, -1);
+         if (keyMap != 0) {
+             // handleSpecialKeys() takes the Android keycode
+diff --git a/app/src/main/java/com/limelight/LayoutEditorActivity.java b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+new file mode 100644
+index 0000000..78e88a4
+--- /dev/null
++++ b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+@@ -0,0 +1,42 @@
++package com.limelight;
++
++import android.app.Activity;
++import android.os.Bundle;
++import android.view.Gravity;
++import android.view.View;
++import android.view.Window;
++import android.view.WindowManager;
++import android.widget.FrameLayout;
++import android.widget.TextView;
++import com.limelight.binding.input.virtual_controller.VirtualController;
++
++/** Local, disconnected editor: it cannot send controller input to a game. */
++public final class LayoutEditorActivity extends Activity {
++    private VirtualController controller;
++    @Override protected void onCreate(Bundle state) {
++        super.onCreate(state);
++        requestWindowFeature(Window.FEATURE_NO_TITLE);
++        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
++        FrameLayout root = new FrameLayout(this);
++        root.setBackgroundColor(0xff19251f);
++        TextView label = new TextView(this);
++        label.setText(R.string.nxb_layout_preview); label.setTextColor(0xff9cb0a0); label.setGravity(Gravity.CENTER);
++        root.addView(label, new FrameLayout.LayoutParams(-1, -1));
++        setContentView(root);
++        root.post(() -> {
++            if (isFinishing()) return;
++            controller = new VirtualController(null, root, this);
++            controller.setLayoutIdentity(getIntent().getStringExtra(Game.EXTRA_LIBRARY_GAME_ID),
++                    getIntent().getStringExtra(Game.EXTRA_PC_UUID),
++                    getIntent().getIntExtra(Game.EXTRA_APP_ID, 0),
++                    getIntent().getStringExtra(Game.EXTRA_APP_NAME));
++            controller.refreshLayout();
++            controller.show();
++            controller.beginEditing(this::finish);
++        });
++    }
++    @Override public void onBackPressed() {
++        if (controller != null && controller.isEditing()) controller.cancelEditing();
++        else super.onBackPressed();
++    }
++}
+diff --git a/app/src/main/java/com/limelight/ShortcutTrampoline.java b/app/src/main/java/com/limelight/ShortcutTrampoline.java
+index 6157379..7fda5fe 100644
+--- a/app/src/main/java/com/limelight/ShortcutTrampoline.java
++++ b/app/src/main/java/com/limelight/ShortcutTrampoline.java
+@@ -312,6 +312,7 @@ public class ShortcutTrampoline extends Activity {
+             app = new NvApp(getIntent().getStringExtra(Game.EXTRA_APP_NAME),
+                     Integer.parseInt(appIdString),
+                     getIntent().getBooleanExtra(Game.EXTRA_APP_HDR, false));
++            app.setLibraryGameId(getIntent().getStringExtra(Game.EXTRA_LIBRARY_GAME_ID));
+         }
+         else if (appNameString != null && !appNameString.isEmpty()) {
+             // Use appNameString to find the corresponding AppId
+diff --git a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+index 0fffe5d..760ebcb 100644
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -115,6 +115,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     private final Activity activityContext;
+     private final double stickDeadzone;
+     private final InputDeviceContext defaultContext = new InputDeviceContext();
++    private final InputDeviceContext oscContext = new InputDeviceContext();
++    private final SourceArbiter nxbSources = new SourceArbiter();
+     private final GameGestures gestures;
+     private final InputManager inputManager;
+     private final Vibrator deviceVibrator;
+@@ -205,6 +207,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         // consume these. Instead, let's ignore them since that's probably the
+         // most likely case.
+         defaultContext.ignoreBack = true;
++        oscContext.controllerNumber = 0;
++        oscContext.assignedControllerNumber = true;
+ 
+         // Get the initially attached set of gamepads. As each gamepad receives
+         // its initial InputEvent, we will move these from this set onto the
+@@ -230,12 +234,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     }
+ 
+     @Override
+-    public void onInputDeviceAdded(int deviceId) {
++    public synchronized void onInputDeviceAdded(int deviceId) {
+         // Nothing happening here yet
+     }
+ 
+     @Override
+-    public void onInputDeviceRemoved(int deviceId) {
++    public synchronized void onInputDeviceRemoved(int deviceId) {
+         InputDeviceContext context = inputDeviceContexts.get(deviceId);
+         if (context != null) {
+             LimeLog.info("Removed controller: "+context.name+" ("+deviceId+")");
+@@ -248,7 +252,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     // This can happen when gaining/losing input focus with some devices.
+     // Input devices that have a trackpad may gain/lose AXIS_RELATIVE_X/Y.
+     @Override
+-    public void onInputDeviceChanged(int deviceId) {
++    public synchronized void onInputDeviceChanged(int deviceId) {
+         InputDevice device = InputDevice.getDevice(deviceId);
+         if (device == null) {
+             return;
+@@ -418,7 +422,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         // If this device sent data as a gamepad, zero the values before removing.
+         // We must do this after clearing the currentControllers entry so this
+         // causes the device to be removed on the server PC.
+-        if (context.assignedControllerNumber) {
++        if (context.assignedControllerNumber &&
++                (context.controllerNumber != 0 || nxbSources.owner() == SourceArbiter.Source.PHYSICAL)) {
+             conn.sendControllerInput(context.controllerNumber, getActiveControllerMask(),
+                     (short) 0,
+                     (byte) 0, (byte) 0,
+@@ -1205,11 +1210,115 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         }
+     }
+ 
+-    private void sendControllerInputPacket(GenericControllerContext originalContext) {
++    private volatile boolean nxbInputSuppressed;
++    private volatile boolean nxbAwaitingNeutral;
++
++    private boolean nxbNeutral(GenericControllerContext c) {
++        return c.inputMap == 0 && c.leftTrigger == 0 && c.rightTrigger == 0 &&
++                c.leftStickX == 0 && c.leftStickY == 0 && c.rightStickX == 0 && c.rightStickY == 0;
++    }
++    private boolean nxbAllNeutral() {
++        if (!nxbNeutral(defaultContext) || !nxbNeutral(oscContext)) return false;
++        for (int i = 0; i < inputDeviceContexts.size(); i++) if (!nxbNeutral(inputDeviceContexts.valueAt(i))) return false;
++        for (int i = 0; i < usbDeviceContexts.size(); i++) if (!nxbNeutral(usbDeviceContexts.valueAt(i))) return false;
++        return true;
++    }
++    // Ignore small physical-axis noise when deciding whether a source claims control.
++    private boolean nxbPhysicalNeutral(GenericControllerContext c) {
++        return c.inputMap == 0 && (c.leftTrigger & 0xff) < 8 && (c.rightTrigger & 0xff) < 8 &&
++                Math.abs((int)c.leftStickX) < 4096 && Math.abs((int)c.leftStickY) < 4096 &&
++                Math.abs((int)c.rightStickX) < 4096 && Math.abs((int)c.rightStickY) < 4096;
++    }
++    private boolean nxbPhysicalNeutral() {
++        if (!nxbPhysicalNeutral(defaultContext)) return false;
++        for (int i = 0; i < inputDeviceContexts.size(); i++) {
++            GenericControllerContext c = inputDeviceContexts.valueAt(i);
++            if ((!c.assignedControllerNumber || c.controllerNumber == 0) && !nxbPhysicalNeutral(c)) return false;
++        }
++        for (int i = 0; i < usbDeviceContexts.size(); i++) {
++            GenericControllerContext c = usbDeviceContexts.valueAt(i);
++            if ((!c.assignedControllerNumber || c.controllerNumber == 0) && !nxbPhysicalNeutral(c)) return false;
++        }
++        return true;
++    }
++    private void nxbPublishNeutral() {
++        conn.sendControllerInput((short)0, getActiveControllerMask(), (short)0, (byte)0, (byte)0, (short)0, (short)0, (short)0, (short)0);
++        conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
++        conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
++    }
++    /** A new touch, rather than a retransmission of an old one, claims control. */
++    public synchronized void claimTouchInput() {
++        if (nxbInputSuppressed || nxbAwaitingNeutral) return;
++        if (nxbSources.claimTouch(nxbPhysicalNeutral())) {
++            LimeLog.info("NXBridge input source: touch"); nxbPublishNeutral();
++        }
++    }
++
++    /** Suppress all controller sources while editing and release their published state. */
++    public synchronized void setLayoutInputSuppressed(boolean suppress) {
++        if (suppress) {
++            nxbInputSuppressed = true;
++            nxbAwaitingNeutral = true;
++            short mask = getActiveControllerMask();
++            defaultContext.mouseEmulationLastInputMap = 0;
++            // Publish neutral only for the controller slots already assigned to this session.
++            conn.sendControllerInput((short)0, mask, (short)0, (byte)0, (byte)0, (short)0, (short)0, (short)0, (short)0);
++            for (int i = 0; i < inputDeviceContexts.size(); i++) {
++                GenericControllerContext c = inputDeviceContexts.valueAt(i);
++                c.mouseEmulationLastInputMap = 0;
++                if (c.assignedControllerNumber && c.controllerNumber != 0)
++                    conn.sendControllerInput(c.controllerNumber, mask, (short)0, (byte)0, (byte)0, (short)0, (short)0, (short)0, (short)0);
++            }
++            for (int i = 0; i < usbDeviceContexts.size(); i++) {
++                GenericControllerContext c = usbDeviceContexts.valueAt(i);
++                c.mouseEmulationLastInputMap = 0;
++                if (c.assignedControllerNumber && c.controllerNumber != 0)
++                    conn.sendControllerInput(c.controllerNumber, mask, (short)0, (byte)0, (byte)0, (short)0, (short)0, (short)0, (short)0);
++            }
++            conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
++            conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
++        } else {
++            // Existing held physical controls must return to neutral before new input can flow.
++            nxbAwaitingNeutral = !nxbAllNeutral();
++            nxbSources.reset(nxbPhysicalNeutral());
++            nxbInputSuppressed = false;
++        }
++    }
++
++    private synchronized void sendControllerInputPacket(GenericControllerContext originalContext) {
++        if (nxbInputSuppressed) return;
++        if (nxbAwaitingNeutral) {
++            if (!nxbAllNeutral()) return;
++            nxbAwaitingNeutral = false;
++        }
++        // Moonlight's controller-arrival helper itself sends a neutral state.
++        // Do not announce a newly discovered physical device for axis noise
++        // while touch owns slot 0, or that neutral would release a held touch.
++        if (originalContext != oscContext && !originalContext.assignedControllerNumber &&
++                nxbSources.owner() == SourceArbiter.Source.TOUCH && nxbPhysicalNeutral(originalContext)) return;
+         assignControllerNumberIfNeeded(originalContext);
+ 
+         // Take the context's controller number and fuse all inputs with the same number
+         short controllerNumber = originalContext.controllerNumber;
++        boolean touch = originalContext == oscContext;
++        if (controllerNumber == 0) {
++            if (touch && nxbSources.owner() != SourceArbiter.Source.TOUCH) return;
++            if (!touch) {
++                boolean switched = nxbSources.physicalUpdate(!nxbPhysicalNeutral(originalContext), nxbPhysicalNeutral());
++                if (switched) {
++                    LimeLog.info("NXBridge input source: physical; buttons=" + originalContext.inputMap + " axes=" + originalContext.leftStickX + "," + originalContext.leftStickY + "," + originalContext.rightStickX + "," + originalContext.rightStickY + " triggers=" + (originalContext.leftTrigger & 0xff) + "," + (originalContext.rightTrigger & 0xff));
++                    nxbPublishNeutral();
++                    final long generation = nxbSources.generation();
++                    activityContext.runOnUiThread(() -> {
++                        synchronized (ControllerHandler.this) {
++                            if (nxbSources.owner() == SourceArbiter.Source.PHYSICAL && nxbSources.generation() == generation && activityContext instanceof com.limelight.Game)
++                                ((com.limelight.Game)activityContext).nxbPhysicalInputTakeover();
++                        }
++                    });
++                }
++                if (nxbSources.owner() != SourceArbiter.Source.PHYSICAL) return;
++            }
++        }
+         int inputMap = 0;
+         byte leftTrigger = 0;
+         byte rightTrigger = 0;
+@@ -1218,6 +1327,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         short rightStickX = 0;
+         short rightStickY = 0;
+ 
++        if (touch) {
++            inputMap = oscContext.inputMap; leftTrigger = oscContext.leftTrigger; rightTrigger = oscContext.rightTrigger;
++            leftStickX = oscContext.leftStickX; leftStickY = oscContext.leftStickY; rightStickX = oscContext.rightStickX; rightStickY = oscContext.rightStickY;
++        } else {
+         // In order to properly handle controllers that are split into multiple devices,
+         // we must aggregate all controllers with the same controller number into a single
+         // device before we send it.
+@@ -1227,12 +1340,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+                     context.controllerNumber == controllerNumber &&
+                     context.mouseEmulationActive == originalContext.mouseEmulationActive) {
+                 inputMap |= context.inputMap;
+-                leftTrigger |= maxByMagnitude(leftTrigger, context.leftTrigger);
+-                rightTrigger |= maxByMagnitude(rightTrigger, context.rightTrigger);
+-                leftStickX |= maxByMagnitude(leftStickX, context.leftStickX);
+-                leftStickY |= maxByMagnitude(leftStickY, context.leftStickY);
+-                rightStickX |= maxByMagnitude(rightStickX, context.rightStickX);
+-                rightStickY |= maxByMagnitude(rightStickY, context.rightStickY);
++                leftTrigger = (byte)Math.max(leftTrigger & 0xff, context.leftTrigger & 0xff);
++                rightTrigger = (byte)Math.max(rightTrigger & 0xff, context.rightTrigger & 0xff);
++                leftStickX = maxByMagnitude(leftStickX, context.leftStickX);
++                leftStickY = maxByMagnitude(leftStickY, context.leftStickY);
++                rightStickX = maxByMagnitude(rightStickX, context.rightStickX);
++                rightStickY = maxByMagnitude(rightStickY, context.rightStickY);
+             }
+         }
+         for (int i = 0; i < usbDeviceContexts.size(); i++) {
+@@ -1241,22 +1354,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+                     context.controllerNumber == controllerNumber &&
+                     context.mouseEmulationActive == originalContext.mouseEmulationActive) {
+                 inputMap |= context.inputMap;
+-                leftTrigger |= maxByMagnitude(leftTrigger, context.leftTrigger);
+-                rightTrigger |= maxByMagnitude(rightTrigger, context.rightTrigger);
+-                leftStickX |= maxByMagnitude(leftStickX, context.leftStickX);
+-                leftStickY |= maxByMagnitude(leftStickY, context.leftStickY);
+-                rightStickX |= maxByMagnitude(rightStickX, context.rightStickX);
+-                rightStickY |= maxByMagnitude(rightStickY, context.rightStickY);
++                leftTrigger = (byte)Math.max(leftTrigger & 0xff, context.leftTrigger & 0xff);
++                rightTrigger = (byte)Math.max(rightTrigger & 0xff, context.rightTrigger & 0xff);
++                leftStickX = maxByMagnitude(leftStickX, context.leftStickX);
++                leftStickY = maxByMagnitude(leftStickY, context.leftStickY);
++                rightStickX = maxByMagnitude(rightStickX, context.rightStickX);
++                rightStickY = maxByMagnitude(rightStickY, context.rightStickY);
+             }
+         }
+         if (defaultContext.controllerNumber == controllerNumber) {
+             inputMap |= defaultContext.inputMap;
+-            leftTrigger |= maxByMagnitude(leftTrigger, defaultContext.leftTrigger);
+-            rightTrigger |= maxByMagnitude(rightTrigger, defaultContext.rightTrigger);
+-            leftStickX |= maxByMagnitude(leftStickX, defaultContext.leftStickX);
+-            leftStickY |= maxByMagnitude(leftStickY, defaultContext.leftStickY);
+-            rightStickX |= maxByMagnitude(rightStickX, defaultContext.rightStickX);
+-            rightStickY |= maxByMagnitude(rightStickY, defaultContext.rightStickY);
++            leftTrigger = (byte)Math.max(leftTrigger & 0xff, defaultContext.leftTrigger & 0xff);
++            rightTrigger = (byte)Math.max(rightTrigger & 0xff, defaultContext.rightTrigger & 0xff);
++            leftStickX = maxByMagnitude(leftStickX, defaultContext.leftStickX);
++            leftStickY = maxByMagnitude(leftStickY, defaultContext.leftStickY);
++            rightStickX = maxByMagnitude(rightStickX, defaultContext.rightStickX);
++            rightStickY = maxByMagnitude(rightStickY, defaultContext.rightStickY);
++        }
++
+         }
+ 
+         if (originalContext.mouseEmulationActive) {
+@@ -1810,7 +1925,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         }
+     }
+ 
+-    public boolean handleMotionEvent(MotionEvent event) {
++    public synchronized boolean handleMotionEvent(MotionEvent event) {
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;
+@@ -1859,6 +1974,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     }
+ 
+     private void sendEmulatedMouseMove(short x, short y) {
++        if (nxbInputSuppressed || nxbAwaitingNeutral) return;
+         Vector2d vector = convertRawStickAxisToPixelMovement(x, y);
+         if (vector.getMagnitude() >= 1) {
+             conn.sendMouseMove((short)vector.getX(), (short)-vector.getY());
+@@ -1866,6 +1982,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     }
+ 
+     private void sendEmulatedMouseScroll(short x, short y) {
++        if (nxbInputSuppressed || nxbAwaitingNeutral) return;
+         Vector2d vector = convertRawStickAxisToPixelMovement(x, y);
+         if (vector.getMagnitude() >= 1) {
+             conn.sendMouseHighResScroll((short)vector.getY());
+@@ -2322,7 +2439,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         }
+     }
+ 
+-    public boolean handleButtonUp(KeyEvent event) {
++    public synchronized boolean handleButtonUp(KeyEvent event) {
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;
+@@ -2559,7 +2676,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         return true;
+     }
+ 
+-    public boolean handleButtonDown(KeyEvent event) {
++    public synchronized boolean handleButtonDown(KeyEvent event) {
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;
+@@ -2784,26 +2901,26 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+         return true;
+     }
+ 
+-    public void reportOscState(int buttonFlags,
++    public synchronized void reportOscState(int buttonFlags,
+                                short leftStickX, short leftStickY,
+                                short rightStickX, short rightStickY,
+                                byte leftTrigger, byte rightTrigger) {
+-        defaultContext.leftStickX = leftStickX;
+-        defaultContext.leftStickY = leftStickY;
++        oscContext.leftStickX = leftStickX;
++        oscContext.leftStickY = leftStickY;
+ 
+-        defaultContext.rightStickX = rightStickX;
+-        defaultContext.rightStickY = rightStickY;
++        oscContext.rightStickX = rightStickX;
++        oscContext.rightStickY = rightStickY;
+ 
+-        defaultContext.leftTrigger = leftTrigger;
+-        defaultContext.rightTrigger = rightTrigger;
++        oscContext.leftTrigger = leftTrigger;
++        oscContext.rightTrigger = rightTrigger;
+ 
+-        defaultContext.inputMap = buttonFlags;
++        oscContext.inputMap = buttonFlags;
+ 
+-        sendControllerInputPacket(defaultContext);
++        sendControllerInputPacket(oscContext);
+     }
+ 
+     @Override
+-    public void reportControllerState(int controllerId, int buttonFlags,
++    public synchronized void reportControllerState(int controllerId, int buttonFlags,
+                                       float leftStickX, float leftStickY,
+                                       float rightStickX, float rightStickY,
+                                       float leftTrigger, float rightTrigger) {
+@@ -2842,7 +2959,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     }
+ 
+     @Override
+-    public void deviceRemoved(AbstractController controller) {
++    public synchronized void deviceRemoved(AbstractController controller) {
+         UsbDeviceContext context = usbDeviceContexts.get(controller.getControllerId());
+         if (context != null) {
+             LimeLog.info("Removed controller: "+controller.getControllerId());
+@@ -2853,7 +2970,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
+     }
+ 
+     @Override
+-    public void deviceAdded(AbstractController controller) {
++    public synchronized void deviceAdded(AbstractController controller) {
+         if (stopped) {
+             return;
+         }
+diff --git a/app/src/main/java/com/limelight/binding/input/SourceArbiter.java b/app/src/main/java/com/limelight/binding/input/SourceArbiter.java
+new file mode 100644
+index 0000000..5ba80b2
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/SourceArbiter.java
+@@ -0,0 +1,37 @@
++package com.limelight.binding.input;
++
++/** Chooses one primary source for controller slot zero. A displaced physical
++ * controller must return to neutral before it can claim control again. */
++public final class SourceArbiter {
++    public enum Source { TOUCH, PHYSICAL }
++    private Source owner = Source.TOUCH;
++    private boolean physicalBlocked;
++    private long generation;
++
++    public Source owner() { return owner; }
++    public long generation() { return generation; }
++    public boolean claimTouch(boolean physicalNeutral) {
++        if (owner == Source.TOUCH) return false;
++        owner = Source.TOUCH;
++        physicalBlocked = !physicalNeutral;
++        generation++;
++        return true;
++    }
++    public boolean physicalUpdate(boolean meaningful, boolean physicalNeutral) {
++        if (physicalBlocked) {
++            if (physicalNeutral) physicalBlocked = false;
++            return false;
++        }
++        if (owner == Source.TOUCH && meaningful) {
++            owner = Source.PHYSICAL;
++            generation++;
++            return true;
++        }
++        return false;
++    }
++    public void reset(boolean physicalNeutral) {
++        owner = Source.TOUCH;
++        physicalBlocked = !physicalNeutral;
++        generation++;
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
+index 5419f23..8ff5742 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
+@@ -11,6 +11,8 @@ import android.graphics.Paint;
+ import android.preference.PreferenceManager;
+ import android.view.MotionEvent;
+ 
++import org.json.JSONException;
++import org.json.JSONObject;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -91,6 +93,31 @@ public class AnalogStick extends VirtualControllerElement {
+     /**
+      * configuration if the analog stick should be displayed as circle or square
+      */
++    private float curveDeadzone = 0.12f, curveSaturation = 1f, curveExponent = 1f;
++    private boolean gestureEnabled = true, floatingTapCandidate, floatingPendingTap;
++    private long floatingDownTime;
++    boolean gestureEnabled() { return gestureEnabled; }
++    void setGestureEnabled(boolean enabled) { gestureEnabled = enabled; floatingPendingTap = false; }
++
++    float[] getCurve() { return new float[]{curveDeadzone, curveSaturation, curveExponent}; }
++    void setCurve(float d, float s, float e) {
++        if (!FloatingStickMath.validCurve(d, s, e)) throw new IllegalArgumentException("invalid curve");
++        curveDeadzone = d; curveSaturation = s; curveExponent = e;
++    }
++    @Override public JSONObject getConfiguration() throws JSONException {
++        JSONObject result = super.getConfiguration();
++        if (floating) { result.put("DEADZONE", curveDeadzone); result.put("SATURATION", curveSaturation); result.put("EXPONENT", curveExponent); result.put("GESTURE", gestureEnabled); }
++        return result;
++    }
++    @Override public void loadConfiguration(JSONObject configuration) throws JSONException {
++        float d = (float)configuration.optDouble("DEADZONE", 0.12);
++        float s = (float)configuration.optDouble("SATURATION", 1);
++        float e = (float)configuration.optDouble("EXPONENT", 1);
++        if (floating && !FloatingStickMath.validCurve(d, s, e)) throw new JSONException("invalid curve");
++        super.loadConfiguration(configuration);
++        if (floating) { setCurve(d, s, e); setGestureEnabled(configuration.optBoolean("GESTURE", true)); }
++    }
++
+     private boolean circle_stick = true; // TODO: implement square sick for simulations
+ 
+     /**
+@@ -277,7 +304,8 @@ public class AnalogStick extends VirtualControllerElement {
+ 
+     private void drawFloating(Canvas canvas) {
+         paint.setAntiAlias(true);
+-        if (virtualController.getControllerMode() != VirtualController.ControllerMode.Active) {
++        if (virtualController.getControllerMode() != VirtualController.ControllerMode.Active &&
++                virtualController.getControllerMode() != VirtualController.ControllerMode.TestButtons) {
+             paint.setColor(0x44208396);
+             paint.setStyle(Paint.Style.FILL);
+             canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
+@@ -308,22 +336,24 @@ public class AnalogStick extends VirtualControllerElement {
+             case MotionEvent.ACTION_DOWN:
+                 floatingOriginX = floatingX = event.getX();
+                 floatingOriginY = floatingY = event.getY();
+-                if (click_state == CLICK_STATE.SINGLE &&
+-                        event.getEventTime() - timeLastClick <= timeoutDoubleClick) {
+-                    click_state = CLICK_STATE.DOUBLE;
++                if (gestureEnabled && floatingPendingTap && event.getEventTime() - timeLastClick <= timeoutDoubleClick) {
++                    click_state = CLICK_STATE.DOUBLE; floatingPendingTap = false;
+                     notifyOnDoubleClick();
+                 } else {
+-                    click_state = CLICK_STATE.SINGLE;
++                    click_state = CLICK_STATE.SINGLE; floatingPendingTap = false;
+                     notifyOnClick();
+                 }
+-                timeLastClick = event.getEventTime();
++                floatingTapCandidate = true; floatingDownTime = event.getEventTime();
+                 setPressed(true);
+                 notifyOnMovement(0, 0);
+                 break;
+             case MotionEvent.ACTION_MOVE:
+                 if (isPressed()) {
++                    if (Math.hypot(event.getX() - floatingOriginX, event.getY() - floatingOriginY) >
++                            Math.max(floatingRadius * 0.12f, android.view.ViewConfiguration.get(getContext()).getScaledTouchSlop()))
++                        floatingTapCandidate = false;
+                     float[] xy = FloatingStickMath.axes(event.getX() - floatingOriginX,
+-                            event.getY() - floatingOriginY, floatingRadius);
++                            event.getY() - floatingOriginY, floatingRadius, curveDeadzone, curveSaturation, curveExponent);
+                     floatingX = floatingOriginX + xy[0] * floatingRadius;
+                     floatingY = floatingOriginY - xy[1] * floatingRadius;
+                     notifyOnMovement(xy[0], xy[1]);
+@@ -332,6 +362,10 @@ public class AnalogStick extends VirtualControllerElement {
+             case MotionEvent.ACTION_CANCEL:
+             case MotionEvent.ACTION_UP:
+                 if (isPressed()) {
++                    floatingPendingTap = event.getActionMasked() == MotionEvent.ACTION_UP && gestureEnabled &&
++                            click_state == CLICK_STATE.SINGLE && floatingTapCandidate &&
++                            event.getEventTime() - floatingDownTime <= timeoutDoubleClick;
++                    if (floatingPendingTap) timeLastClick = event.getEventTime();
+                     setPressed(false);
+                     notifyOnRevoke();
+                     notifyOnMovement(0, 0);
+@@ -373,6 +407,10 @@ public class AnalogStick extends VirtualControllerElement {
+ 
+     @Override
+     public boolean onElementTouchEvent(MotionEvent event) {
++        if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
++            timeLastClick = 0;
++            click_state = CLICK_STATE.SINGLE; floatingPendingTap = false; floatingTapCandidate = false;
++        }
+         if (floating) return onFloatingTouch(event);
+         // save last click state
+         CLICK_STATE lastClickState = click_state;
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
+index 8bff37e..3d88fca 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
+@@ -123,6 +123,8 @@ public class DigitalButton extends VirtualControllerElement {
+         listeners.add(listener);
+     }
+ 
++    public String getLabel() { return text; }
++
+     public void setText(String text) {
+         this.text = text;
+         invalidate();
+@@ -150,7 +152,7 @@ public class DigitalButton extends VirtualControllerElement {
+ 
+         // Translucent backing remains legible over bright game scenes.
+         paint.setStyle(Paint.Style.FILL);
+-        paint.setColor(isPressed() ? 0xC0208396 : 0x70121D29);
++        paint.setColor(isPressed() ? 0xE0208396 : (virtualController.highContrastEnabled() ? 0xD0121D29 : 0x70121D29));
+         canvas.drawOval(rect, paint);
+         paint.setStyle(Paint.Style.STROKE);
+         paint.setColor(isPressed() ? pressedColor : getDefaultColor());
+@@ -200,8 +202,6 @@ public class DigitalButton extends VirtualControllerElement {
+     @Override
+     public boolean onElementTouchEvent(MotionEvent event) {
+         // get masked (not specific to a pointer) action
+-        float x = getX() + event.getX();
+-        float y = getY() + event.getY();
+         int action = event.getActionMasked();
+ 
+         switch (action) {
+@@ -215,8 +215,8 @@ public class DigitalButton extends VirtualControllerElement {
+                 return true;
+             }
+             case MotionEvent.ACTION_MOVE: {
+-                checkMovementForAllButtons(x, y);
+-
++                // The initial touch owns this button until release; do not press
++                // neighboring buttons simply because the finger slides over them.
+                 return true;
+             }
+             case MotionEvent.ACTION_CANCEL:
+@@ -224,8 +224,6 @@ public class DigitalButton extends VirtualControllerElement {
+                 setPressed(false);
+                 onReleaseCallback();
+ 
+-                checkMovementForAllButtons(x, y);
+-
+                 invalidate();
+ 
+                 return true;
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
+index ec73010..bf788ac 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
+@@ -56,7 +56,7 @@ public class DigitalPad extends VirtualControllerElement {
+         float corner = Math.min(w, h) * 0.14f;
+         boolean active = (direction & bit) != 0;
+         paint.setStyle(Paint.Style.FILL);
+-        paint.setColor(active ? 0xC0208396 : 0x70121D29);
++        paint.setColor(active ? 0xE0208396 : (virtualController.highContrastEnabled() ? 0xD0121D29 : 0x70121D29));
+         canvas.drawRoundRect(left, top, right, bottom, corner, corner, paint);
+         paint.setStyle(Paint.Style.STROKE);
+         paint.setColor(active ? pressedColor : getDefaultColor());
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/FloatingStickMath.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/FloatingStickMath.java
+index d84b87a..1f905c3 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/FloatingStickMath.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/FloatingStickMath.java
+@@ -1,14 +1,27 @@
+ package com.limelight.binding.input.virtual_controller;
+ 
+-/** Maps displacement from a floating touch origin to a clamped controller axis. */
++/** Maps touch displacement to a controller axis, with a radial response curve. */
+ public final class FloatingStickMath {
+     private FloatingStickMath() { }
++
++    private static boolean finite(float v) { return !Float.isNaN(v) && !Float.isInfinite(v); }
++
++    public static boolean validCurve(float deadzone, float saturation, float exponent) {
++        return finite(deadzone) && finite(saturation) && finite(exponent) &&
++                deadzone >= 0 && deadzone < saturation && saturation <= 1 && exponent > 0;
++    }
++
+     public static float[] axes(float dx, float dy, float radius) {
+-        if (!(radius > 0)) return new float[]{0, 0};
++        return axes(dx, dy, radius, 0.12f, 1f, 1f);
++    }
++
++    public static float[] axes(float dx, float dy, float radius, float deadzone, float saturation, float exponent) {
++        if (!finite(dx) || !finite(dy) || !finite(radius) ||
++                !(radius > 0) || !validCurve(deadzone, saturation, exponent)) return new float[]{0, 0};
+         double length = Math.hypot(dx, dy);
+-        double dead = radius * 0.12;
+-        if (length <= dead) return new float[]{0, 0};
+-        double magnitude = Math.min(1, (length - dead) / (radius - dead));
++        double r = length / radius;
++        if (r <= deadzone || length == 0) return new float[]{0, 0};
++        double magnitude = Math.pow(Math.min(1, (r - deadzone) / (saturation - deadzone)), exponent);
+         return new float[]{(float)(dx / length * magnitude), (float)(-dy / length * magnitude)};
+     }
+ }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java
+new file mode 100644
+index 0000000..ab5c7e7
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java
+@@ -0,0 +1,22 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Names a device-local layout without depending on a mutable display title. */
++public final class LayoutIdentity {
++    private LayoutIdentity() { }
++    public static String key(String libraryId, String serverUuid, int appId, int orientation, boolean floating) {
++        return key(libraryId, serverUuid, appId, orientation, floating, false, false);
++    }
++    public static String key(String libraryId, String serverUuid, int appId, int orientation, boolean floating, boolean onlyStickClicks, boolean guideButton) {
++        String id;
++        if (libraryId != null && libraryId.matches("[A-Za-z0-9_.-]{1,64}")) {
++            id = "game:" + libraryId;
++        } else if (serverUuid != null && serverUuid.matches("[A-Za-z0-9-]{1,64}") && appId != 0) {
++            id = "legacy:" + serverUuid + ":" + appId;
++        } else {
++            throw new IllegalArgumentException("missing layout identity");
++        }
++        if (orientation != 1 && orientation != 2) throw new IllegalArgumentException("unknown orientation");
++        return id + ":" + orientation + ":" + (floating ? "floating" : "fixed") +
++                (onlyStickClicks ? ":stick-clicks-only" : "") + (guideButton ? ":guide" : "");
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+new file mode 100644
+index 0000000..f9236f2
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -0,0 +1,206 @@
++package com.limelight.binding.input.virtual_controller;
++
++import android.content.Context;
++import android.util.AtomicFile;
++import android.widget.FrameLayout;
++import org.json.JSONArray;
++import org.json.JSONException;
++import org.json.JSONObject;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++/** Private, versioned local profile; never deletes or modifies the old OSC preferences. */
++final class LayoutProfileStore {
++    private static final int MAX_BYTES = 64 * 1024;
++    private static final Object LOCK = new Object();
++    static final class RevisionConflict extends IOException {
++        RevisionConflict() { super("layout revision conflict"); }
++    }
++    private final String identity;
++    private final AtomicFile file;
++    private final int width, height, minTarget;
++
++    LayoutProfileStore(Context context, String identity, int width, int height) {
++        if (identity == null || identity.isEmpty() || width <= 0 || height <= 0) throw new IllegalArgumentException("invalid layout identity or display");
++        this.identity = identity;
++        this.width = width;
++        this.height = height;
++        this.minTarget = Math.max(1, (int)Math.ceil(48 * context.getResources().getDisplayMetrics().density));
++        try {
++            byte[] digest = MessageDigest.getInstance("SHA-256").digest(identity.getBytes(StandardCharsets.UTF_8));
++            StringBuilder name = new StringBuilder();
++            for (byte b : digest) name.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
++            File dir = new File(context.getFilesDir(), "nxbridge-layouts");
++            if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) throw new IOException("layout directory unavailable");
++            file = new AtomicFile(new File(dir, name + ".json"));
++        } catch (Exception e) { throw new IllegalArgumentException("layout storage unavailable", e); }
++    }
++
++    private static String key(VirtualControllerElement element) {
++        return element.elementId + ((element instanceof AnalogStick && ((AnalogStick)element).isFloating()) ? "_float" : "");
++    }
++
++    /** A complete draft is captured on the UI thread; persistence runs away from input. */
++    JSONObject capture(List<VirtualControllerElement> elements, boolean hapticEnabled, boolean idleFade, boolean highContrast) throws JSONException, IOException {
++        if (elements.size() == 0 || elements.size() > 32) throw new IOException("invalid control count");
++        JSONArray controls = new JSONArray();
++        Set<String> seen = new HashSet<>();
++        for (VirtualControllerElement element : elements) {
++            String key = key(element);
++            if (!seen.add(key)) throw new IOException("duplicate control");
++            if (element.isOptionalControl() && !element.isControlEnabled()) continue;
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) element.getLayoutParams();
++            boolean zone = key.endsWith("_float");
++            if (p.leftMargin < 0 || p.topMargin < 0 || p.width <= 0 || p.height <= 0 ||
++                p.leftMargin + (long)p.width > width || p.topMargin + (long)p.height > height ||
++                (!zone && (p.width < minTarget || p.height < minTarget))) throw new IOException("control outside safe area or too small");
++            JSONObject item = new JSONObject();
++            item.put("id", key); item.put("x", p.leftMargin / (double)width); item.put("y", p.topMargin / (double)height);
++            item.put("w", p.width / (double)width); item.put("h", p.height / (double)height);
++            if (zone) {
++                float[] curve = ((AnalogStick)element).getCurve();
++                JSONObject c = new JSONObject(); c.put("d", curve[0]); c.put("s", curve[1]); c.put("e", curve[2]); c.put("gesture", ((AnalogStick)element).gestureEnabled());
++                item.put("curve", c);
++            }
++            controls.put(item);
++        }
++        JSONObject doc = new JSONObject(); doc.put("schema", 1); doc.put("identity", identity); doc.put("controls", controls); doc.put("revision", 1); doc.put("haptic", hapticEnabled); doc.put("fade", idleFade); doc.put("contrast", highContrast);
++        validate(doc, elements);
++        // Floating activation zones intentionally sit underneath buttons. Other
++        // targets must not overlap each other or the permanent settings entry.
++        for (int i = 0; i < controls.length(); i++) {
++            JSONObject a = controls.getJSONObject(i); if (a.getString("id").endsWith("_float")) continue;
++            double ax = a.getDouble("x") * width, ay = a.getDouble("y") * height;
++            double aw = a.getDouble("w") * width, ah = a.getDouble("h") * height;
++            double gear = height * 0.06;
++            if (ax < 15 + gear && ax + aw > 15 && ay < 15 + gear && ay + ah > 15) throw new IOException("control overlaps settings");
++            for (int j = i + 1; j < controls.length(); j++) {
++                JSONObject b = controls.getJSONObject(j); if (b.getString("id").endsWith("_float")) continue;
++                double bx = b.getDouble("x") * width, by = b.getDouble("y") * height;
++                double bw = b.getDouble("w") * width, bh = b.getDouble("h") * height;
++                if (ax < bx + bw - 0.01 && ax + aw > bx + 0.01 && ay < by + bh - 0.01 && ay + ah > by + 0.01) throw new IOException("overlapping controls");
++            }
++        }
++        return doc;
++    }
++
++    private JSONObject readDocument(AtomicFile target) throws IOException, JSONException {
++        if (!target.getBaseFile().exists() && !new File(target.getBaseFile().getPath() + ".bak").exists()) return null;
++        try (FileInputStream in = target.openRead(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
++            byte[] buf = new byte[4096]; int n;
++            while ((n = in.read(buf)) != -1) { if (out.size() + n > MAX_BYTES) throw new IOException("layout too large"); out.write(buf, 0, n); }
++            return new JSONObject(out.toString("UTF-8"));
++        }
++    }
++
++    private HashMap<String, JSONObject> validate(JSONObject doc, List<VirtualControllerElement> elements) throws JSONException, IOException {
++        if ((doc.length() != 4 && doc.length() != 5 && doc.length() != 7) || (doc.length() >= 5 && !(doc.opt("haptic") instanceof Boolean)) || (doc.length() == 7 && (!(doc.opt("fade") instanceof Boolean) || !(doc.opt("contrast") instanceof Boolean))) || doc.getInt("schema") != 1 || !identity.equals(doc.getString("identity")) || doc.getLong("revision") < 1) throw new IOException("invalid profile header");
++        JSONArray controls = doc.getJSONArray("controls");
++        if (controls.length() > elements.size() || controls.length() == 0 || controls.length() > 32) throw new IOException("unexpected controls");
++        HashMap<String, JSONObject> found = new HashMap<>();
++        for (int i = 0; i < controls.length(); i++) {
++            JSONObject item = controls.getJSONObject(i); if (item.length() != 5 && item.length() != 6) throw new IOException("unknown control field");
++            String id = item.getString("id");
++            if (!id.matches("(?:[1-9]|1[0-6])(?:_float)?") || found.put(id, item) != null) throw new IOException("invalid control id");
++            if (item.length() == 6) {
++                if (!id.endsWith("_float") || !item.has("curve")) throw new IOException("unexpected curve");
++                JSONObject curve = item.getJSONObject("curve");
++                if ((curve.length() != 3 && curve.length() != 4) || (curve.length() == 4 && !(curve.opt("gesture") instanceof Boolean)) || !FloatingStickMath.validCurve((float)curve.getDouble("d"), (float)curve.getDouble("s"), (float)curve.getDouble("e"))) throw new IOException("invalid curve");
++            }
++            double x=item.getDouble("x"), y=item.getDouble("y"), w=item.getDouble("w"), h=item.getDouble("h");
++            if (Double.isNaN(x) || Double.isInfinite(x) || Double.isNaN(y) || Double.isInfinite(y) || Double.isNaN(w) || Double.isInfinite(w) || Double.isNaN(h) || Double.isInfinite(h) ||
++                x < 0 || y < 0 || w <= 0 || h <= 0 || x+w > 1.000001 || y+h > 1.000001 ||
++                (!id.endsWith("_float") && (w*width < minTarget || h*height < minTarget)) ||
++                Math.round(x*width) + Math.round(w*width) > width || Math.round(y*height) + Math.round(h*height) > height) throw new IOException("invalid control bounds");
++        }
++        Set<String> expected = new HashSet<>();
++        for (VirtualControllerElement element : elements) {
++            expected.add(key(element));
++            if (!element.isOptionalControl() && !found.containsKey(key(element))) throw new IOException("missing control");
++        }
++        for (String id : found.keySet()) if (!expected.contains(id)) throw new IOException("unexpected control");
++        JSONObject left = found.get("12_float"), right = found.get("13_float");
++        if (left != null && right != null && left.getDouble("x") + left.getDouble("w") > right.getDouble("x") && right.getDouble("x") + right.getDouble("w") > left.getDouble("x") && left.getDouble("y") + left.getDouble("h") > right.getDouble("y") && right.getDouble("y") + right.getDouble("h") > left.getDouble("y")) throw new IOException("overlapping stick areas");
++        return found;
++    }
++
++    long load(List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
++        synchronized (LOCK) {
++            JSONObject doc = readDocument(file); if (doc == null) return 0;
++            applyDocument(doc, elements, controller);
++            return doc.getLong("revision");
++        }
++    }
++
++    boolean previewPrevious(List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
++        synchronized (LOCK) {
++            JSONObject current = readDocument(file); if (current == null || current.getLong("revision") < 2) return false;
++            JSONObject doc = readDocument(history(current.getLong("revision") - 1)); if (doc == null) return false;
++            applyDocument(doc, elements, controller); return true;
++        }
++    }
++
++    private void applyDocument(JSONObject doc, List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
++            HashMap<String, JSONObject> found = validate(doc, elements);
++            controller.setVisualOptions(doc.optBoolean("haptic", false), doc.optBoolean("fade", false), doc.optBoolean("contrast", false));
++            for (VirtualControllerElement element : elements) {
++                JSONObject item = found.get(key(element));
++                if (item == null && element.isOptionalControl()) { element.setControlEnabled(false); continue; }
++                JSONObject geometry = new JSONObject();
++                if (element.isOptionalControl()) geometry.put("ENABLED", true);
++                geometry.put("LEFT", (int)Math.round(item.getDouble("x")*width)); geometry.put("TOP", (int)Math.round(item.getDouble("y")*height));
++                geometry.put("WIDTH", (int)Math.round(item.getDouble("w")*width)); geometry.put("HEIGHT", (int)Math.round(item.getDouble("h")*height));
++                if (item.has("curve")) {
++                    JSONObject curve = item.getJSONObject("curve");
++                    geometry.put("DEADZONE", curve.getDouble("d")); geometry.put("SATURATION", curve.getDouble("s")); geometry.put("EXPONENT", curve.getDouble("e")); geometry.put("GESTURE", curve.optBoolean("gesture", true));
++                }
++                element.loadConfiguration(geometry);
++            }
++    }
++
++    private AtomicFile history(long revision) {
++        File base = file.getBaseFile();
++        return new AtomicFile(new File(base.getParentFile(), base.getName() + ".revision-" + revision));
++    }
++    private void writeAtomic(AtomicFile target, byte[] data) throws IOException {
++        FileOutputStream out = null;
++        try { out = target.startWrite(); out.write(data); out.getFD().sync(); target.finishWrite(out); }
++        catch (IOException | RuntimeException e) { if (out != null) target.failWrite(out); throw new IOException("layout write failed", e); }
++    }
++
++    long save(JSONObject draft, long expected, List<VirtualControllerElement> elements) throws IOException, JSONException {
++        synchronized (LOCK) {
++            JSONObject old = readDocument(file);
++            long current = old == null ? 0 : old.getLong("revision");
++            if (old != null) validate(old, elements);
++            if (current != expected || current == Long.MAX_VALUE) throw new RevisionConflict();
++            draft.put("revision", current + 1); validate(draft, elements);
++            byte[] data = draft.toString().getBytes(StandardCharsets.UTF_8); if (data.length > MAX_BYTES) throw new IOException("layout too large");
++            // History is immutable: a failed save cannot overwrite an earlier revision.
++            if (old != null) {
++                AtomicFile history = history(current);
++                JSONObject existing = readDocument(history);
++                if (existing == null) {
++                    File base = file.getBaseFile();
++                    String prefix = base.getName() + ".revision-";
++                    String[] entries = base.getParentFile().list((dir, name) -> name.startsWith(prefix) && !name.endsWith(".bak") && !name.endsWith(".new"));
++                    if (entries == null || entries.length >= 128) throw new IOException("layout history is full");
++                    writeAtomic(history, old.toString().getBytes(StandardCharsets.UTF_8));
++                } else if (!existing.toString().equals(old.toString())) {
++                    throw new IOException("layout history conflict");
++                }
++            }
++            writeAtomic(file, data);
++            return current + 1;
++        }
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+index 8edede5..90ba886 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -5,6 +5,10 @@
+ package com.limelight.binding.input.virtual_controller;
+ 
+ import android.content.Context;
++import android.app.AlertDialog;
++import android.widget.EditText;
++import android.widget.CheckBox;
++import android.text.InputType;
+ import android.os.Handler;
+ import android.os.Looper;
+ import android.util.DisplayMetrics;
+@@ -14,9 +18,20 @@ import android.os.SystemClock;
+ import android.widget.Button;
+ import android.widget.FrameLayout;
+ import android.widget.Toast;
++import android.widget.LinearLayout;
++import android.widget.HorizontalScrollView;
++import android.widget.ScrollView;
++import android.widget.TextView;
++import android.view.Gravity;
++import android.content.res.Configuration;
++import android.preference.PreferenceManager;
++import org.json.JSONObject;
++import java.util.HashMap;
+ 
+ import com.limelight.LimeLog;
+ import com.limelight.R;
++import com.limelight.nvstream.input.ControllerPacket;
++import com.limelight.preferences.PreferenceConfiguration;
+ import com.limelight.binding.input.ControllerHandler;
+ 
+ import java.util.ArrayList;
+@@ -36,7 +51,8 @@ public class VirtualController {
+     public enum ControllerMode {
+         Active,
+         MoveButtons,
+-        ResizeButtons
++        ResizeButtons,
++        TestButtons
+     }
+ 
+     private static final boolean _PRINT_DEBUG_INFORMATION = false;
+@@ -60,6 +76,36 @@ public class VirtualController {
+     private Button buttonConfigure = null;
+ 
+     private List<VirtualControllerElement> elements = new ArrayList<>();
++    private String libraryGameId, serverUuid, gameName;
++    private int appId;
++    private LayoutProfileStore profileStore;
++    private long profileRevision;
++    private boolean localHaptics, idleFade, highContrast, beforeHaptics, beforeFade, beforeContrast, undoHaptics, undoFade, undoContrast;
++    boolean localHapticsEnabled() { return localHaptics; }
++    boolean idleFadeEnabled() { return idleFade; }
++    boolean highContrastEnabled() { return highContrast; }
++    void setVisualOptions(boolean haptics, boolean fade, boolean contrast) { localHaptics = haptics; idleFade = fade; highContrast = contrast; }
++    private void rememberUndoOptions() { undoHaptics = localHaptics; undoFade = idleFade; undoContrast = highContrast; }
++    private void refreshElementVisibility() { for (VirtualControllerElement e : elements) e.refreshIdleVisibility(); }
++    private boolean saving;
++    private boolean geometryChangedWhileSaving;
++    private HashMap<String, JSONObject> beforeEdit;
++    private HashMap<String, JSONObject> undoEdit;
++    private LinearLayout editorBar;
++    private TextView editorStatus;
++    private Runnable editorFinished;
++
++    public boolean isSaving() { return saving; }
++    public int layoutWidth() { return context.getResources().getDisplayMetrics().widthPixels; }
++    public int layoutHeight() { return context.getResources().getDisplayMetrics().heightPixels; }
++    private static String elementKey(VirtualControllerElement e) {
++        return e.elementId + ((e instanceof AnalogStick && ((AnalogStick)e).isFloating()) ? "_float" : "");
++    }
++    public void setLayoutIdentity(String gameId, String uuid, int id, String name) {
++        libraryGameId = gameId; serverUuid = uuid; appId = id; gameName = name;
++    }
++    public boolean isEditing() { return currentMode != ControllerMode.Active; }
++
+ 
+     public VirtualController(final ControllerHandler controllerHandler, FrameLayout layout, final Context context) {
+         this.controllerHandler = controllerHandler;
+@@ -74,28 +120,7 @@ public class VirtualController {
+         buttonConfigure.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View v) {
+-                String message;
+-
+-                if (currentMode == ControllerMode.Active){
+-                    releaseAll();
+-                    currentMode = ControllerMode.MoveButtons;
+-                    message = "Entering configuration mode (Move buttons)";
+-                } else if (currentMode == ControllerMode.MoveButtons) {
+-                    currentMode = ControllerMode.ResizeButtons;
+-                    message = "Entering configuration mode (Resize buttons)";
+-                } else {
+-                    currentMode = ControllerMode.Active;
+-                    VirtualControllerConfigurationLoader.saveProfile(VirtualController.this, context);
+-                    message = "Exiting configuration mode";
+-                }
+-
+-                Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+-
+-                buttonConfigure.invalidate();
+-
+-                for (VirtualControllerElement element : elements) {
+-                    element.invalidate();
+-                }
++                if (!isEditing()) beginEditing(null);
+             }
+         });
+ 
+@@ -116,7 +141,7 @@ public class VirtualController {
+ 
+     public void show() {
+         for (VirtualControllerElement element : elements) {
+-            element.setVisibility(View.VISIBLE);
++            if (element.isControlEnabled()) element.setVisibility(View.VISIBLE);
+         }
+ 
+         buttonConfigure.setVisibility(View.VISIBLE);
+@@ -151,9 +176,15 @@ public class VirtualController {
+         }
+     }
+ 
++    void claimTouchInput() { if (controllerHandler != null) controllerHandler.claimTouchInput(); }
++    public void cancelForPhysicalTakeover() {
++        handler.removeCallbacks(delayedRetransmitRunnable);
++        releaseAll();
++    }
+     private void releaseAll() {
+         long now = SystemClock.uptimeMillis();
+         for (VirtualControllerElement element : elements) {
++            element.blockHeldTouch();
+             MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0, 0, 0);
+             element.onElementTouchEvent(cancel);
+             cancel.recycle();
+@@ -184,9 +215,330 @@ public class VirtualController {
+         // Start with the default layout
+         VirtualControllerConfigurationLoader.createDefaultLayout(this, context);
+ 
+-        // Apply user preferences onto the default layout
++        // Preserve the legacy OSC profile as a fallback; new game profiles never modify it.
+         VirtualControllerConfigurationLoader.loadFromPreferences(this, context);
+-        buttonConfigure.bringToFront();
++        profileStore = null;
++        profileRevision = 0; setVisualOptions(false, false, false);
++        try {
++            boolean floating = PreferenceManager.getDefaultSharedPreferences(context).getBoolean("checkbox_floating_sticks", true);
++            int orientation = context.getResources().getConfiguration().orientation;
++            PreferenceConfiguration config = PreferenceConfiguration.readPreferences(context);
++            String identity = LayoutIdentity.key(libraryGameId, serverUuid, appId, orientation, floating, config.onlyL3R3, config.showGuideButton);
++            profileStore = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight());
++            profileRevision = profileStore.load(elements, this);
++        } catch (Exception e) {
++            Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show();
++        }
++        buttonConfigure.bringToFront(); refreshElementVisibility();
++    }
++
++    public void onDisplayChanged() {
++        if (saving) { geometryChangedWhileSaving = true; return; }
++        if (isEditing()) {
++            cancelEditing();
++            Toast.makeText(context, R.string.nxb_layout_display_changed, Toast.LENGTH_LONG).show();
++        }
++        refreshLayout();
++    }
++
++    private HashMap<String, JSONObject> snapshotGeometry() throws org.json.JSONException {
++        HashMap<String, JSONObject> state = new HashMap<>();
++        for (VirtualControllerElement e : elements) state.put(elementKey(e), e.getConfiguration());
++        return state;
++    }
++    private void applyGeometry(HashMap<String, JSONObject> state) throws org.json.JSONException {
++        for (VirtualControllerElement e : elements) {
++            JSONObject geometry = state.get(elementKey(e));
++            if (geometry != null) e.loadConfiguration(geometry);
++        }
++    }
++    void beginElementEdit(VirtualControllerElement element) {
++        if (!isEditing() || saving || currentMode == ControllerMode.TestButtons) return;
++        try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
++        String name = element instanceof DigitalButton ? ((DigitalButton)element).getLabel() :
++                element.elementId == VirtualControllerElement.EID_LS ? context.getString(R.string.nxb_layout_left_stick) :
++                element.elementId == VirtualControllerElement.EID_RS ? context.getString(R.string.nxb_layout_right_stick) :
++                context.getString(R.string.nxb_layout_dpad);
++        if (editorStatus != null) editorStatus.setText(name + " · " + element.getWidth() + "×" + element.getHeight() + " · " + context.getString(R.string.nxb_layout_unsaved));
++    }
++    private void undoEdit() {
++        if (undoEdit == null || saving) return;
++        try { HashMap<String, JSONObject> current = snapshotGeometry(); boolean h = localHaptics, f = idleFade, c = highContrast; applyGeometry(undoEdit); setVisualOptions(undoHaptics, undoFade, undoContrast); undoHaptics = h; undoFade = f; undoContrast = c; undoEdit = current; invalidateElements(); }
++        catch (org.json.JSONException e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
++    }
++    private void previousVersion() {
++        if (profileStore == null || saving) return;
++        try {
++            HashMap<String, JSONObject> old = snapshotGeometry();
++            boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
++            if (profileStore.previewPrevious(elements, this)) { undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast; invalidateElements(); }
++            else Toast.makeText(context, R.string.nxb_layout_no_previous, Toast.LENGTH_SHORT).show();
++        } catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
++    }
++
++    public void beginEditing(Runnable finished) {
++        if (isEditing() || saving) return;
++        if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(true);
++        if (context instanceof com.limelight.Game) ((com.limelight.Game)context).nxbLayoutEditStarting();
++        handler.removeCallbacks(delayedRetransmitRunnable);
++        releaseAll();
++        try {
++            beforeEdit = snapshotGeometry(); beforeHaptics = localHaptics; beforeFade = idleFade; beforeContrast = highContrast;
++            undoEdit = null;
++        } catch (Exception e) {
++            if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
++            Toast.makeText(context, R.string.nxb_layout_save_failed, Toast.LENGTH_LONG).show();
++            return;
++        }
++        currentMode = ControllerMode.MoveButtons; refreshElementVisibility();
++        editorFinished = finished;
++        buttonConfigure.setVisibility(View.INVISIBLE);
++        editorBar = new LinearLayout(context);
++        editorBar.setOrientation(LinearLayout.HORIZONTAL);
++        editorBar.setGravity(Gravity.CENTER_VERTICAL);
++        editorBar.setBackgroundColor(0xEE1A3025);
++        editorBar.setPadding(12, 4, 12, 4);
++        editorStatus = new TextView(context);
++        editorStatus.setTextColor(0xFFF2FAF3); editorStatus.setTextSize(14);
++        editorStatus.setMaxLines(2); editorStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
++        editorStatus.setText((gameName == null ? "" : gameName + " · ") + context.getString(R.string.nxb_layout_unsaved));
++        int statusWidth = Math.min((int)(layoutWidth() * 0.24f), (int)(320 * context.getResources().getDisplayMetrics().density));
++        editorBar.addView(editorStatus, new LinearLayout.LayoutParams(statusWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
++        HorizontalScrollView scroller = new HorizontalScrollView(context);
++        scroller.setFillViewport(false);
++        LinearLayout row = new LinearLayout(context); row.setGravity(Gravity.CENTER_VERTICAL);
++        addEditorButton(row, R.string.nxb_layout_presets, this::choosePreset);
++        addEditorButton(row, R.string.nxb_layout_move, () -> setEditMode(ControllerMode.MoveButtons));
++        addEditorButton(row, R.string.nxb_layout_size, () -> setEditMode(ControllerMode.ResizeButtons));
++        addEditorButton(row, R.string.nxb_layout_curve, this::editCurves);
++        addEditorButton(row, R.string.nxb_layout_haptic, this::editHaptics);
++        addEditorButton(row, R.string.nxb_layout_test, () -> setEditMode(ControllerMode.TestButtons));
++        addEditorButton(row, R.string.nxb_layout_undo, this::undoEdit);
++        addEditorButton(row, R.string.nxb_layout_previous, this::previousVersion);
++        addEditorButton(row, R.string.nxb_layout_default, this::previewDefault);
++        scroller.addView(row);
++        editorBar.addView(scroller, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
++        addEditorButton(editorBar, R.string.nxb_layout_cancel, this::cancelEditing);
++        addEditorButton(editorBar, R.string.nxb_layout_save, this::saveEditing);
++        FrameLayout.LayoutParams bar = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
++        frame_layout.addView(editorBar, bar);
++        editorBar.bringToFront();
++        Toast.makeText(context, context instanceof com.limelight.Game ? R.string.nxb_layout_game_running : R.string.nxb_layout_preview, Toast.LENGTH_LONG).show();
++        invalidateElements();
++    }
++
++    private void addEditorButton(LinearLayout row, int label, Runnable action) {
++        Button button = new Button(context);
++        button.setText(label); button.setAllCaps(false);
++        button.setOnClickListener(v -> { if (!saving) action.run(); });
++        row.addView(button);
++    }
++    private void invalidateElements() { for (VirtualControllerElement e : elements) e.invalidate(); }
++    private void setEditMode(ControllerMode mode) {
++        if (!isEditing() || saving) return;
++        releaseAll(); currentMode = mode;
++        editorStatus.setText(mode == ControllerMode.TestButtons ? context.getString(R.string.nxb_layout_test_hint) : context.getString(R.string.nxb_layout_unsaved));
++        invalidateElements();
++    }
++    private void editHaptics() {
++        VirtualControllerElement leftClick = null, rightClick = null;
++        for (VirtualControllerElement element : elements) if (element.isOptionalControl()) {
++            if (element.elementId == VirtualControllerElement.EID_LSB) leftClick = element;
++            if (element.elementId == VirtualControllerElement.EID_RSB) rightClick = element;
++        }
++        final VirtualControllerElement l3 = leftClick, r3 = rightClick;
++        boolean extras = l3 != null && r3 != null;
++        final boolean[] options = extras ? new boolean[]{localHaptics, idleFade, highContrast, l3.isControlEnabled(), r3.isControlEnabled()} : new boolean[]{localHaptics, idleFade, highContrast};
++        String[] labels = extras ? new String[]{context.getString(R.string.nxb_haptic_on), context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_button_l3), context.getString(R.string.nxb_button_r3)} :
++                new String[]{context.getString(R.string.nxb_haptic_on), context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast)};
++        new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_haptic)
++                .setMultiChoiceItems(labels, options, (dialog, which, checked) -> options[which] = checked)
++                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
++                    try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
++                    releaseAll(); setVisualOptions(options[0], options[1], options[2]);
++                    if (l3 != null && r3 != null) { l3.setControlEnabled(options[3]); r3.setControlEnabled(options[4]); }
++                    invalidateElements();
++                }).setNegativeButton(android.R.string.cancel, null).show();
++    }
++
++    private void choosePreset() {
++        String[] choices = {context.getString(R.string.nxb_preset_compact), context.getString(R.string.nxb_preset_standard), context.getString(R.string.nxb_preset_edge), context.getString(R.string.nxb_import_common), context.getString(R.string.nxb_import_host)};
++        new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_presets)
++                .setItems(choices, (dialog, which) -> {
++                    if (which >= 3) { importLegacy(which == 3); return; }
++                    previewDefault();
++                    int width = layoutWidth(), height = layoutHeight();
++                    for (VirtualControllerElement element : elements) {
++                        FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)element.getLayoutParams();
++                        int dx = 0, dy = 0;
++                        if (which == 0) {
++                            if (element.elementId == VirtualControllerElement.EID_DPAD) dy = -(int)(height * 0.05f);
++                            if (element.elementId == VirtualControllerElement.EID_BACK || element.elementId == VirtualControllerElement.EID_START) dy = (int)(height * 0.05f);
++                            if (element.elementId == VirtualControllerElement.EID_LB) dx = -(int)(width * 0.01f);
++                            if (element.elementId == VirtualControllerElement.EID_RB) dx = (int)(width * 0.01f);
++                        } else if (which == 2) {
++                            if (element.elementId == VirtualControllerElement.EID_DPAD || element.elementId == VirtualControllerElement.EID_BACK) dx = -(int)(width * 0.02f);
++                            if (element.elementId == VirtualControllerElement.EID_START) dx = (int)(width * 0.02f);
++                        }
++                        p.leftMargin = Math.max(0, Math.min(width - p.width, p.leftMargin + dx));
++                        p.topMargin = Math.max(0, Math.min(height - p.height, p.topMargin + dy));
++                        element.requestLayout();
++                    }
++                    editorStatus.setText(choices[which] + " · " + context.getString(R.string.nxb_layout_unsaved));
++                }).setNegativeButton(android.R.string.cancel, null).show();
++    }
++
++    private void importLegacy(boolean common) {
++        if (!isEditing() || saving || profileStore == null) return;
++        HashMap<String, JSONObject> old = null;
++        boolean h = localHaptics, f = idleFade, c = highContrast;
++        try {
++            old = snapshotGeometry();
++            if (common) {
++                android.content.SharedPreferences prefs = context.getSharedPreferences(VirtualControllerConfigurationLoader.OSC_PREFERENCE, Context.MODE_PRIVATE);
++                boolean found = false;
++                for (VirtualControllerElement e : elements) {
++                    String raw = prefs.getString(elementKey(e), null);
++                    if (raw == null) continue;
++                    JSONObject legacy = new JSONObject(raw); JSONObject geometry = e.getConfiguration();
++                    for (String field : new String[]{"LEFT", "TOP", "WIDTH", "HEIGHT"}) geometry.put(field, legacy.getInt(field));
++                    e.loadConfiguration(geometry); found = true;
++                }
++                if (!found) { Toast.makeText(context, R.string.nxb_import_missing, Toast.LENGTH_SHORT).show(); return; }
++            } else {
++                boolean floating = PreferenceManager.getDefaultSharedPreferences(context).getBoolean("checkbox_floating_sticks", true);
++                PreferenceConfiguration config = PreferenceConfiguration.readPreferences(context);
++                String identity = LayoutIdentity.key(null, serverUuid, appId, context.getResources().getConfiguration().orientation, floating, config.onlyL3R3, config.showGuideButton);
++                LayoutProfileStore legacy = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight());
++                if (legacy.load(elements, this) == 0) { Toast.makeText(context, R.string.nxb_import_missing, Toast.LENGTH_SHORT).show(); return; }
++            }
++            profileStore.capture(elements, localHaptics, idleFade, highContrast);
++            undoEdit = old; undoHaptics = h; undoFade = f; undoContrast = c;
++            editorStatus.setText(context.getString(R.string.nxb_import_draft)); invalidateElements();
++        } catch (Exception e) {
++            if (old != null) try { applyGeometry(old); } catch (Exception ignored) {}
++            setVisualOptions(h, f, c); invalidateElements();
++            Toast.makeText(context, R.string.nxb_import_failed, Toast.LENGTH_LONG).show();
++        }
++    }
++
++    private void editCurves() {
++        AnalogStick left = null, right = null;
++        for (VirtualControllerElement element : elements) {
++            if (!(element instanceof AnalogStick) || !((AnalogStick)element).isFloating()) continue;
++            if (element.elementId == VirtualControllerElement.EID_LS) left = (AnalogStick)element;
++            if (element.elementId == VirtualControllerElement.EID_RS) right = (AnalogStick)element;
++        }
++        if (left == null || right == null) {
++            Toast.makeText(context, R.string.nxb_curve_floating_only, Toast.LENGTH_LONG).show(); return;
++        }
++        final AnalogStick leftStick = left, rightStick = right;
++        LinearLayout form = new LinearLayout(context); form.setOrientation(LinearLayout.VERTICAL);
++        int pad = (int)(20 * context.getResources().getDisplayMetrics().density); form.setPadding(pad, 0, pad, 0);
++        EditText[] fields = new EditText[6]; CheckBox[] gestures = new CheckBox[2];
++        float[] lc = left.getCurve(), rc = right.getCurve();
++        for (int side = 0; side < 2; side++) {
++            TextView title = new TextView(context); title.setText(side == 0 ? R.string.nxb_layout_left_stick : R.string.nxb_layout_right_stick); form.addView(title);
++            LinearLayout line = new LinearLayout(context); line.setOrientation(LinearLayout.HORIZONTAL);
++            String[] labels = {context.getString(R.string.nxb_curve_dead), context.getString(R.string.nxb_curve_saturation), context.getString(R.string.nxb_curve_exponent)};
++            for (int j = 0; j < 3; j++) {
++                LinearLayout column = new LinearLayout(context); column.setOrientation(LinearLayout.VERTICAL);
++                TextView label = new TextView(context); label.setText(labels[j]); column.addView(label);
++                EditText field = new EditText(context); field.setSingleLine(true);
++                field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
++                field.setText(String.format(java.util.Locale.ROOT, "%.2f", (side == 0 ? lc : rc)[j]));
++                column.addView(field); line.addView(column, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1)); fields[side * 3 + j] = field;
++            }
++            form.addView(line);
++            CheckBox gesture = new CheckBox(context); gesture.setText(side == 0 ? R.string.nxb_gesture_left : R.string.nxb_gesture_right);
++            gesture.setChecked((side == 0 ? left : right).gestureEnabled()); form.addView(gesture); gestures[side] = gesture;
++        }
++        TextView hint = new TextView(context); hint.setText(R.string.nxb_curve_hint); form.addView(hint);
++        ScrollView scroll = new ScrollView(context); scroll.addView(form);
++        AlertDialog dialog = new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_curve).setView(scroll)
++                .setNegativeButton(android.R.string.cancel, null).setPositiveButton(android.R.string.ok, null).create();
++        dialog.setOnShowListener(unused -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
++            try {
++                float[] values = new float[6];
++                for (int i = 0; i < values.length; i++) values[i] = Float.parseFloat(fields[i].getText().toString());
++                if (!FloatingStickMath.validCurve(values[0], values[1], values[2]) || !FloatingStickMath.validCurve(values[3], values[4], values[5])) throw new IllegalArgumentException();
++                undoEdit = snapshotGeometry(); rememberUndoOptions(); leftStick.setCurve(values[0], values[1], values[2]); rightStick.setCurve(values[3], values[4], values[5]);
++                leftStick.setGestureEnabled(gestures[0].isChecked()); rightStick.setGestureEnabled(gestures[1].isChecked());
++                dialog.dismiss();
++            } catch (Exception e) { Toast.makeText(context, R.string.nxb_curve_invalid, Toast.LENGTH_LONG).show(); }
++        }));
++        dialog.show();
++    }
++
++    private void previewDefault() {
++        if (!isEditing() || saving) return;
++        try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
++        releaseAll(); removeElements();
++        // Build fresh defaults without reading either stored profile.
++        int buttonSize = (int)(layoutHeight()*0.06f);
++        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(buttonSize, buttonSize);
++        params.leftMargin = 15; params.topMargin = 15;
++        frame_layout.addView(buttonConfigure, params);
++        buttonConfigure.setVisibility(View.INVISIBLE);
++        VirtualControllerConfigurationLoader.createDefaultLayout(this, context);
++        // Reset geometry only; preserve independent stick response settings.
++        if (undoEdit != null) for (VirtualControllerElement element : elements) {
++            JSONObject prior = undoEdit.get(elementKey(element));
++            if (element.isOptionalControl() && prior != null) element.setControlEnabled(prior.optBoolean("ENABLED", false));
++            if (!(element instanceof AnalogStick) || !((AnalogStick)element).isFloating()) continue;
++            JSONObject old = undoEdit.get(elementKey(element));
++            if (old != null) try {
++                ((AnalogStick)element).setCurve((float)old.optDouble("DEADZONE", 0.12),
++                        (float)old.optDouble("SATURATION", 1), (float)old.optDouble("EXPONENT", 1));
++                ((AnalogStick)element).setGestureEnabled(old.optBoolean("GESTURE", true));
++            } catch (IllegalArgumentException ignored) { /* Keep the safe default. */ }
++        }
++        currentMode = ControllerMode.MoveButtons;
++        editorBar.bringToFront(); invalidateElements();
++    }
++    public void cancelEditing() {
++        if (!isEditing() || saving) return;
++        releaseAll();
++        try {
++            applyGeometry(beforeEdit); setVisualOptions(beforeHaptics, beforeFade, beforeContrast);
++        } catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
++        finishEditing();
++        if (geometryChangedWhileSaving) { geometryChangedWhileSaving = false; refreshLayout(); }
++    }
++    private void saveEditing() {
++        if (!isEditing() || saving) return;
++        if (geometryChangedWhileSaving) { Toast.makeText(context, R.string.nxb_layout_display_changed, Toast.LENGTH_LONG).show(); return; }
++        releaseAll();
++        if (profileStore == null) { Toast.makeText(context, R.string.nxb_layout_save_failed, Toast.LENGTH_LONG).show(); return; }
++        final JSONObject draft;
++        final ArrayList<VirtualControllerElement> snapshot = new ArrayList<>(elements);
++        try { draft = profileStore.capture(snapshot, localHaptics, idleFade, highContrast); }
++        catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_invalid, Toast.LENGTH_LONG).show(); return; }
++        saving = true;
++        final long expected = profileRevision;
++        final LayoutProfileStore store = profileStore;
++        new Thread(() -> {
++            try {
++                long updated = store.save(draft, expected, snapshot);
++                handler.post(() -> { profileRevision = updated; saving = false; finishEditing();
++                    if (geometryChangedWhileSaving) { geometryChangedWhileSaving = false; refreshLayout(); }
++                    Toast.makeText(context, R.string.nxb_layout_saved, Toast.LENGTH_SHORT).show(); });
++            } catch (Exception e) {
++                final int message = e instanceof LayoutProfileStore.RevisionConflict ? R.string.nxb_layout_conflict : R.string.nxb_layout_save_failed;
++                handler.post(() -> { saving = false; Toast.makeText(context, message, Toast.LENGTH_LONG).show(); });
++            }
++        }, "NXBridge layout save").start();
++    }
++    private void finishEditing() {
++        releaseAll(); handler.removeCallbacks(delayedRetransmitRunnable);
++        currentMode = ControllerMode.Active;
++        if (editorBar != null) frame_layout.removeView(editorBar);
++        editorBar = null; beforeEdit = null; undoEdit = null;
++        buttonConfigure.setVisibility(View.VISIBLE); buttonConfigure.bringToFront();
++        if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
++        invalidateElements(); refreshElementVisibility();
++        Runnable finished = editorFinished; editorFinished = null;
++        if (finished != null) finished.run();
+     }
+ 
+     public ControllerMode getControllerMode() {
+@@ -218,6 +570,23 @@ public class VirtualController {
+     }
+ 
+     void sendControllerInputContext() {
++        if (isEditing()) {
++            if (editorStatus != null && currentMode == ControllerMode.TestButtons) {
++                StringBuilder names = new StringBuilder();
++                int map = inputContext.inputMap & 0xffff;
++                int[] masks = {ControllerPacket.A_FLAG, ControllerPacket.B_FLAG, ControllerPacket.X_FLAG, ControllerPacket.Y_FLAG, ControllerPacket.LB_FLAG, ControllerPacket.RB_FLAG, ControllerPacket.UP_FLAG, ControllerPacket.DOWN_FLAG, ControllerPacket.LEFT_FLAG, ControllerPacket.RIGHT_FLAG, ControllerPacket.BACK_FLAG, ControllerPacket.PLAY_FLAG, ControllerPacket.LS_CLK_FLAG, ControllerPacket.RS_CLK_FLAG, ControllerPacket.SPECIAL_BUTTON_FLAG};
++                String[] labels = {"A", "B", "X", "Y", "L", "R", "↑", "↓", "←", "→", "−", "+", "L3", "R3", "HOME"};
++                for (int i = 0; i < masks.length; i++) if ((map & masks[i]) != 0) { if (names.length() > 0) names.append(" "); names.append(labels[i]); }
++                if ((inputContext.leftTrigger & 0xff) != 0) { if (names.length() > 0) names.append(" "); names.append("ZL"); }
++                if ((inputContext.rightTrigger & 0xff) != 0) { if (names.length() > 0) names.append(" "); names.append("ZR"); }
++                if (names.length() == 0) names.append("—");
++                editorStatus.setText(context.getString(R.string.nxb_layout_test_short) + " " + names + "\n" +
++                        String.format(java.util.Locale.ROOT, "L %d,%d%%  R %d,%d%%",
++                                Math.round(inputContext.leftStickX * 100f / 32767), Math.round(inputContext.leftStickY * 100f / 32767),
++                                Math.round(inputContext.rightStickX * 100f / 32767), Math.round(inputContext.rightStickY * 100f / 32767)));
++            }
++            return;
++        }
+         // Cancel retransmissions of prior gamepad inputs
+         handler.removeCallbacks(delayedRetransmitRunnable);
+ 
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+index c182346..1242141 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+@@ -305,6 +305,14 @@ public class VirtualControllerConfigurationLoader {
+                     floating ? zoneHeight : screenScale(ANALOG_SIZE, height)
+             );
+ 
++            // Optional explicit stick-click buttons; disabled until the player chooses them.
++            DigitalButton leftClick = createDigitalButton(VirtualControllerElement.EID_LSB, ControllerPacket.LS_CLK_FLAG, 0, 1, "L3", -1, controller, context);
++            DigitalButton rightClick = createDigitalButton(VirtualControllerElement.EID_RSB, ControllerPacket.RS_CLK_FLAG, 0, 1, "R3", -1, controller, context);
++            leftClick.markOptional(); rightClick.markOptional();
++            int clickSize = Math.max(screenScale(7, height), (int)Math.ceil(48 * screen.density));
++            controller.addElement(leftClick, screen.widthPixels * 18 / 100, height * 65 / 100, clickSize, clickSize);
++            controller.addElement(rightClick, screen.widthPixels * 72 / 100, height * 68 / 100, clickSize, clickSize);
++
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_BACK,
+                     ControllerPacket.BACK_FLAG, 0, 2, "−", -1, controller, context),
+@@ -387,8 +395,7 @@ public class VirtualControllerConfigurationLoader {
+                 } catch (JSONException e) {
+                     e.printStackTrace();
+ 
+-                    // Remove the corrupt element from the preferences
+-                    pref.edit().remove(prefKey).apply();
++                    // Preserve the old profile for recovery; invalid data is not applied.
+                 }
+             }
+         }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+index 1758c07..f161451 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -11,6 +11,7 @@ import android.graphics.Canvas;
+ import android.graphics.Paint;
+ import android.util.DisplayMetrics;
+ import android.view.MotionEvent;
++import android.view.HapticFeedbackConstants;
+ import android.view.View;
+ import android.widget.FrameLayout;
+ 
+@@ -44,9 +45,9 @@ public abstract class VirtualControllerElement extends View {
+ 
+     private int normalColor = 0xF0F3F7FA;
+     protected int pressedColor = 0xF06CE5F1;
+-    private int configMoveColor = 0xF0FF0000;
+-    private int configResizeColor = 0xF0FF00FF;
+-    private int configSelectedColor = 0xF000FF00;
++    private int configMoveColor = 0xF0A7DFB7;
++    private int configResizeColor = 0xF0A7DFB7;
++    private int configSelectedColor = 0xF0A7DFB7;
+ 
+     protected int startSize_x;
+     protected int startSize_y;
+@@ -61,6 +62,23 @@ public abstract class VirtualControllerElement extends View {
+     }
+ 
+     private Mode currentMode = Mode.Normal;
++    private boolean optionalControl, controlEnabled = true;
++    void markOptional() { optionalControl = true; setControlEnabled(false); }
++    boolean isOptionalControl() { return optionalControl; }
++    boolean isControlEnabled() { return controlEnabled; }
++    void setControlEnabled(boolean enabled) { controlEnabled = enabled; setVisibility(enabled ? View.VISIBLE : View.INVISIBLE); }
++    private boolean nxbTouchActive;
++    private final Runnable nxbFade = () -> {
++        if (!virtualController.isEditing() && virtualController.idleFadeEnabled() && !nxbTouchActive)
++            animate().alpha(virtualController.highContrastEnabled() ? 0.8f : 0.65f).setDuration(350).start();
++    };
++    void refreshIdleVisibility() {
++        removeCallbacks(nxbFade); animate().cancel(); setAlpha(1f);
++        if (!virtualController.isEditing() && virtualController.idleFadeEnabled() && !(this instanceof AnalogStick)) postDelayed(nxbFade, 2000);
++    }
++    @Override protected void onDetachedFromWindow() { removeCallbacks(nxbFade); animate().cancel(); super.onDetachedFromWindow(); }
++    private boolean nxbIgnoreUntilRelease;
++    void blockHeldTouch() { if (nxbTouchActive) nxbIgnoreUntilRelease = true; }
+ 
+     protected VirtualControllerElement(VirtualController controller, Context context, int elementId) {
+         super(context);
+@@ -75,8 +93,8 @@ public abstract class VirtualControllerElement extends View {
+ 
+         FrameLayout.LayoutParams layoutParams = (FrameLayout.LayoutParams) getLayoutParams();
+ 
+-        layoutParams.leftMargin = newPos_x > 0 ? newPos_x : 0;
+-        layoutParams.topMargin = newPos_y > 0 ? newPos_y : 0;
++        layoutParams.leftMargin = Math.max(0, Math.min(newPos_x, virtualController.layoutWidth() - layoutParams.width));
++        layoutParams.topMargin = Math.max(0, Math.min(newPos_y, virtualController.layoutHeight() - layoutParams.height));
+         layoutParams.rightMargin = 0;
+         layoutParams.bottomMargin = 0;
+ 
+@@ -89,8 +107,9 @@ public abstract class VirtualControllerElement extends View {
+         int newHeight = height + (startSize_y - pressed_y);
+         int newWidth = width + (startSize_x - pressed_x);
+ 
+-        layoutParams.height = newHeight > 20 ? newHeight : 20;
+-        layoutParams.width = newWidth > 20 ? newWidth : 20;
++        int minimum = (int)Math.ceil(48 * getResources().getDisplayMetrics().density);
++        layoutParams.height = Math.min(Math.max(newHeight, minimum), virtualController.layoutHeight() - layoutParams.topMargin);
++        layoutParams.width = Math.min(Math.max(newWidth, minimum), virtualController.layoutWidth() - layoutParams.leftMargin);
+ 
+         requestLayout();
+     }
+@@ -163,7 +182,7 @@ public abstract class VirtualControllerElement extends View {
+         else if (virtualController.getControllerMode() == VirtualController.ControllerMode.ResizeButtons)
+             return configResizeColor;
+         else
+-            return normalColor;
++            return virtualController.highContrastEnabled() ? 0xFFFFFFFF : normalColor;
+     }
+ 
+     protected int getDefaultStrokeWidth() {
+@@ -232,13 +251,39 @@ public abstract class VirtualControllerElement extends View {
+         if (event.getActionIndex() != 0) {
+             return true;
+         }
+-
+-        if (virtualController.getControllerMode() == VirtualController.ControllerMode.Active) {
+-            return onElementTouchEvent(event);
++        int action = event.getActionMasked();
++        if (this instanceof AnalogStick && action == MotionEvent.ACTION_POINTER_UP) {
++            // The first pointer owns the stick. Never promote another held finger.
++            MotionEvent cancel = MotionEvent.obtain(event);
++            cancel.setAction(MotionEvent.ACTION_CANCEL);
++            onElementTouchEvent(cancel); cancel.recycle();
++            nxbTouchActive = false; nxbIgnoreUntilRelease = true;
++            return true;
++        }
++        if (action == MotionEvent.ACTION_DOWN) { nxbTouchActive = true; removeCallbacks(nxbFade); animate().cancel(); setAlpha(1f); }
++        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
++            nxbTouchActive = false;
++            if (nxbIgnoreUntilRelease) { nxbIgnoreUntilRelease = false; return true; }
++        }
++        if (nxbIgnoreUntilRelease) return true;
++        if (action == MotionEvent.ACTION_MOVE && !nxbTouchActive) return true;
++
++        if (virtualController.isSaving()) return true;
++        if (virtualController.getControllerMode() == VirtualController.ControllerMode.Active ||
++                virtualController.getControllerMode() == VirtualController.ControllerMode.TestButtons) {
++            if (action == MotionEvent.ACTION_DOWN && virtualController.getControllerMode() == VirtualController.ControllerMode.Active)
++                virtualController.claimTouchInput();
++            boolean accepted = onElementTouchEvent(event);
++            if (accepted && action == MotionEvent.ACTION_DOWN && virtualController.localHapticsEnabled() &&
++                    (this instanceof DigitalButton || (this instanceof DigitalPad && ((DigitalPad)this).direction != 0)))
++                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
++            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) refreshIdleVisibility();
++            return accepted;
+         }
+ 
+         switch (event.getActionMasked()) {
+             case MotionEvent.ACTION_DOWN: {
++                virtualController.beginElementEdit(this);
+                 position_pressed_x = event.getX();
+                 position_pressed_y = event.getY();
+                 startSize_x = getWidth();
+@@ -330,12 +375,14 @@ public abstract class VirtualControllerElement extends View {
+         configuration.put("TOP", layoutParams.topMargin);
+         configuration.put("WIDTH", layoutParams.width);
+         configuration.put("HEIGHT", layoutParams.height);
++        if (optionalControl) configuration.put("ENABLED", controlEnabled);
+ 
+         return configuration;
+     }
+ 
+     public void loadConfiguration(JSONObject configuration) throws JSONException {
+         FrameLayout.LayoutParams layoutParams = (FrameLayout.LayoutParams) getLayoutParams();
++        if (optionalControl && configuration.has("ENABLED")) setControlEnabled(configuration.getBoolean("ENABLED"));
+ 
+         layoutParams.leftMargin = configuration.getInt("LEFT");
+         layoutParams.topMargin = configuration.getInt("TOP");
+diff --git a/app/src/main/java/com/limelight/grid/AppGridAdapter.java b/app/src/main/java/com/limelight/grid/AppGridAdapter.java
+index 1f59f64..c9ccd72 100644
+--- a/app/src/main/java/com/limelight/grid/AppGridAdapter.java
++++ b/app/src/main/java/com/limelight/grid/AppGridAdapter.java
+@@ -31,6 +31,7 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
+     private static final int LARGE_WIDTH_DP = 150;
+ 
+     private final ComputerDetails computer;
++    private final AppView appView;
+     private final String uniqueId;
+     private final boolean showHiddenApps;
+ 
+@@ -42,6 +43,7 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
+         super(context, getLayoutIdForPreferences(prefs));
+ 
+         this.computer = computer;
++        this.appView = context instanceof AppView ? (AppView) context : null;
+         this.uniqueId = uniqueId;
+         this.showHiddenApps = showHiddenApps;
+ 
+@@ -168,6 +170,15 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
+     public void populateView(View parentView, ImageView imgView, ProgressBar prgView, TextView txtView, ImageView overlayView, AppView.AppObject obj) {
+         // Let the cached asset loader handle it
+         loader.populateImageView(obj.app, imgView, txtView);
++        View edit = parentView.findViewById(R.id.nxb_edit_layout);
++        if (edit != null) {
++            edit.setVisibility(appView == null ? View.GONE : View.VISIBLE);
++            if (appView != null) edit.setOnClickListener(v -> appView.openLayoutEditor(obj.app));
++            edit.setFocusable(false);
++            edit.setFocusableInTouchMode(false);
++            if (parentView instanceof android.view.ViewGroup)
++                ((android.view.ViewGroup) parentView).setDescendantFocusability(android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
++        }
+ 
+         if (obj.isRunning) {
+             // Show the play button overlay
+diff --git a/app/src/main/java/com/limelight/nvstream/http/NvApp.java b/app/src/main/java/com/limelight/nvstream/http/NvApp.java
+index 68b94ca..e43dc5d 100644
+--- a/app/src/main/java/com/limelight/nvstream/http/NvApp.java
++++ b/app/src/main/java/com/limelight/nvstream/http/NvApp.java
+@@ -7,6 +7,11 @@ public class NvApp {
+     private int appId;
+     private boolean initialized;
+     private boolean hdrSupported;
++    private volatile String libraryGameId = "";
++    public String getLibraryGameId() { return libraryGameId; }
++    public void setLibraryGameId(String value) {
++        libraryGameId = value != null && value.matches("[A-Za-z0-9_.-]{1,64}") ? value : "";
++    }
+     private volatile String coverVersion = "";
+     public String getCoverVersion() { return coverVersion; }
+     public void setCoverVersion(String version) { coverVersion = version != null && version.matches("[0-9a-f]{64}") ? version : ""; }
+diff --git a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java b/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
+index 3b81280..a160adc 100644
+--- a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
++++ b/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
+@@ -660,6 +660,8 @@ public class NvHTTP {
+                     app.setAppName(xpp.getText());
+                 } else if (currentTag.peek().equals("ID")) {
+                     app.setAppId(xpp.getText());
++                } else if (currentTag.peek().equals("NXBridgeGameId")) {
++                    app.setLibraryGameId(xpp.getText());
+                 } else if (currentTag.peek().equals("NXBridgeCoverVersion")) {
+                     app.setCoverVersion(xpp.getText());
+                 } else if (currentTag.peek().equals("IsHdrSupported")) {
+diff --git a/app/src/main/java/com/limelight/utils/ServerHelper.java b/app/src/main/java/com/limelight/utils/ServerHelper.java
+index ef5a790..21eafd0 100644
+--- a/app/src/main/java/com/limelight/utils/ServerHelper.java
++++ b/app/src/main/java/com/limelight/utils/ServerHelper.java
+@@ -47,6 +47,7 @@ public class ServerHelper {
+         i.putExtra(AppView.UUID_EXTRA, computer.uuid);
+         i.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
+         i.putExtra(Game.EXTRA_APP_ID, ""+app.getAppId());
++        i.putExtra(Game.EXTRA_LIBRARY_GAME_ID, app.getLibraryGameId());
+         i.putExtra(Game.EXTRA_APP_HDR, app.isHdrSupported());
+         i.setAction(Intent.ACTION_DEFAULT);
+         return i;
+@@ -60,6 +61,7 @@ public class ServerHelper {
+         intent.putExtra(Game.EXTRA_HTTPS_PORT, computer.httpsPort);
+         intent.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
+         intent.putExtra(Game.EXTRA_APP_ID, app.getAppId());
++        intent.putExtra(Game.EXTRA_LIBRARY_GAME_ID, app.getLibraryGameId());
+         intent.putExtra(Game.EXTRA_APP_HDR, app.isHdrSupported());
+         intent.putExtra(Game.EXTRA_UNIQUEID, managerBinder.getUniqueId());
+         intent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
+diff --git a/app/src/main/res/layout/app_grid_item.xml b/app/src/main/res/layout/app_grid_item.xml
+index 6edffb9..6c066bf 100644
+--- a/app/src/main/res/layout/app_grid_item.xml
++++ b/app/src/main/res/layout/app_grid_item.xml
+@@ -26,4 +26,10 @@
+         android:gravity="center"
+         android:textSize="18sp">
+     </TextView>
++    <ImageButton android:id="@+id/nxb_edit_layout"
++        android:layout_width="48dp" android:layout_height="48dp"
++        android:layout_alignParentEnd="true" android:layout_alignParentBottom="true"
++        android:background="#B01A3025" android:padding="12dp"
++        android:focusable="false" android:focusableInTouchMode="false"
++        android:src="@drawable/ic_settings" android:contentDescription="@string/nxb_layout_entry" />
+ </RelativeLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/app_grid_item_small.xml b/app/src/main/res/layout/app_grid_item_small.xml
+index 7f7c187..9b2829a 100644
+--- a/app/src/main/res/layout/app_grid_item_small.xml
++++ b/app/src/main/res/layout/app_grid_item_small.xml
+@@ -26,4 +26,10 @@
+         android:gravity="center"
+         android:textSize="14sp">
+     </TextView>
++    <ImageButton android:id="@+id/nxb_edit_layout"
++        android:layout_width="48dp" android:layout_height="48dp"
++        android:layout_alignParentEnd="true" android:layout_alignParentBottom="true"
++        android:background="#B01A3025" android:padding="12dp"
++        android:focusable="false" android:focusableInTouchMode="false"
++        android:src="@drawable/ic_settings" android:contentDescription="@string/nxb_layout_entry" />
+ </RelativeLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index afab341..8c8fafb 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -290,4 +290,53 @@
+     <string name="nxb_loading_connecting">正在连接主机，请稍候…</string>
+     <string name="nxb_loading_waiting">正在等待游戏画面…</string>
+     <string name="nxb_loading_cancel">退出</string>
++    <string name="nxb_layout_move">移动</string>
++    <string name="nxb_layout_size">大小</string>
++    <string name="nxb_layout_test">试按</string>
++    <string name="nxb_layout_default">恢复默认</string>
++    <string name="nxb_layout_cancel">取消</string>
++    <string name="nxb_layout_save">保存</string>
++    <string name="nxb_layout_unsaved">未保存</string>
++    <string name="nxb_layout_test_hint">仅试按，不操作游戏</string>
++    <string name="nxb_layout_game_running">编辑时游戏仍在运行</string>
++    <string name="nxb_layout_invalid">请检查控件大小、屏幕边界和重叠区域</string>
++    <string name="nxb_layout_load_failed">布局无法读取，原文件已保留</string>
++    <string name="nxb_layout_save_failed">保存失败，草稿仍保留</string>
++    <string name="nxb_layout_saved">布局已保存</string>
++    <string name="nxb_layout_entry">控制布局</string>
++    <string name="nxb_layout_preview">布局预览，不操作游戏</string>
++    <string name="nxb_layout_display_changed">屏幕尺寸已变化，未保存的布局没有应用</string>
++    <string name="nxb_layout_undo">撤销</string>
++    <string name="nxb_layout_previous">上个版本</string>
++    <string name="nxb_layout_no_previous">没有上一个版本</string>
++    <string name="nxb_layout_left_stick">左摇杆区域</string>
++    <string name="nxb_layout_right_stick">右摇杆区域</string>
++    <string name="nxb_layout_dpad">方向键</string>
++    <string name="nxb_layout_curve">摇杆手感</string>
++    <string name="nxb_curve_dead">中心死区</string>
++    <string name="nxb_curve_saturation">满量程</string>
++    <string name="nxb_curve_exponent">响应指数</string>
++    <string name="nxb_curve_hint">范围：0 ≤ 死区 &lt; 满量程 ≤ 1；响应指数 &gt; 0。</string>
++    <string name="nxb_curve_invalid">摇杆参数无效</string>
++    <string name="nxb_curve_floating_only">请先在设置中启用浮动摇杆</string>
++    <string name="nxb_layout_presets">布局预设</string>
++    <string name="nxb_preset_compact">小手紧凑 · 待试用</string>
++    <string name="nxb_preset_standard">标准</string>
++    <string name="nxb_preset_edge">大屏靠边</string>
++    <string name="nxb_layout_haptic">外观与反馈</string>
++    <string name="nxb_haptic_off">关闭</string>
++    <string name="nxb_haptic_on">轻触反馈 · 仅本机</string>
++    <string name="nxb_idle_fade">闲置时淡出按键</string>
++    <string name="nxb_high_contrast">高对比度</string>
++    <string name="nxb_layout_conflict">布局已在其他地方更新，当前草稿仍保留</string>
++    <string name="nxb_import_common">导入旧通用布局</string>
++    <string name="nxb_import_host">导入旧主机布局</string>
++    <string name="nxb_import_missing">没有找到旧布局</string>
++    <string name="nxb_import_draft">已导入草稿，保存后生效</string>
++    <string name="nxb_import_failed">旧布局无效，已保留当前草稿</string>
++    <string name="nxb_layout_test_short">本机试按</string>
++    <string name="nxb_gesture_left">双击左摇杆触发 L3</string>
++    <string name="nxb_gesture_right">双击右摇杆触发 R3</string>
++    <string name="nxb_button_l3">显示 L3 按钮</string>
++    <string name="nxb_button_r3">显示 R3 按钮</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 542622d..87d535d 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -309,4 +309,53 @@
+     <string name="nxb_loading_connecting">Connecting to your host…</string>
+     <string name="nxb_loading_waiting">Waiting for the game picture…</string>
+     <string name="nxb_loading_cancel">Cancel</string>
++    <string name="nxb_layout_move">Move</string>
++    <string name="nxb_layout_size">Size</string>
++    <string name="nxb_layout_test">Try controls</string>
++    <string name="nxb_layout_default">Restore defaults</string>
++    <string name="nxb_layout_cancel">Cancel</string>
++    <string name="nxb_layout_save">Save</string>
++    <string name="nxb_layout_unsaved">Unsaved layout</string>
++    <string name="nxb_layout_test_hint">Test only · not controlling the game</string>
++    <string name="nxb_layout_game_running">The game continues running while editing</string>
++    <string name="nxb_layout_invalid">Check control size, screen bounds and overlapping controls</string>
++    <string name="nxb_layout_load_failed">Layout could not be loaded; the previous file was kept</string>
++    <string name="nxb_layout_save_failed">Could not save layout; your draft is still open</string>
++    <string name="nxb_layout_saved">Layout saved</string>
++    <string name="nxb_layout_entry">Control layout</string>
++    <string name="nxb_layout_preview">Layout preview · no game input</string>
++    <string name="nxb_layout_display_changed">Display changed; unsaved layout was not applied</string>
++    <string name="nxb_layout_undo">Undo</string>
++    <string name="nxb_layout_previous">Previous version</string>
++    <string name="nxb_layout_no_previous">No previous version</string>
++    <string name="nxb_layout_left_stick">Left stick area</string>
++    <string name="nxb_layout_right_stick">Right stick area</string>
++    <string name="nxb_layout_dpad">Directional pad</string>
++    <string name="nxb_layout_curve">Stick response</string>
++    <string name="nxb_curve_dead">Dead zone</string>
++    <string name="nxb_curve_saturation">Full range</string>
++    <string name="nxb_curve_exponent">Exponent</string>
++    <string name="nxb_curve_hint">Use 0 ≤ dead zone &lt; full range ≤ 1; exponent &gt; 0.</string>
++    <string name="nxb_curve_invalid">Invalid response values</string>
++    <string name="nxb_curve_floating_only">Response settings require floating sticks</string>
++    <string name="nxb_layout_presets">Presets</string>
++    <string name="nxb_preset_compact">Small hands · trial</string>
++    <string name="nxb_preset_standard">Standard</string>
++    <string name="nxb_preset_edge">Large screen · edge</string>
++    <string name="nxb_layout_haptic">Appearance and feedback</string>
++    <string name="nxb_haptic_off">Off</string>
++    <string name="nxb_haptic_on">Light feedback · local only</string>
++    <string name="nxb_idle_fade">Fade controls when idle</string>
++    <string name="nxb_high_contrast">High contrast</string>
++    <string name="nxb_layout_conflict">Layout changed elsewhere; this draft was kept</string>
++    <string name="nxb_import_common">Import old shared layout</string>
++    <string name="nxb_import_host">Import old host layout</string>
++    <string name="nxb_import_missing">No old layout found</string>
++    <string name="nxb_import_draft">Imported as a draft; save to keep</string>
++    <string name="nxb_import_failed">Old layout invalid; the current draft was kept</string>
++    <string name="nxb_layout_test_short">Local test</string>
++    <string name="nxb_gesture_left">Double-tap left stick for L3</string>
++    <string name="nxb_gesture_right">Double-tap right stick for R3</string>
++    <string name="nxb_button_l3">Show L3 button</string>
++    <string name="nxb_button_r3">Show R3 button</string>
+ </resources>

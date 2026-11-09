@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.className = ''; this.textContent = ''; this.innerHTML = ''; this.disabled = false; }
+  constructor(tag) { this.tag = tag; this.children = []; this.className = ''; this.textContent = ''; this.innerHTML = ''; this.disabled = false; this.style = {}; }
   append(...items) { this.children.push(...items); }
   appendChild(item) { this.children.push(item); }
   replaceChildren(...items) { this.children = items; }
@@ -25,7 +25,7 @@ const fetch = async (path, options = {}) => {
   if (fail) throw new Error('offline');
   if (options.method === 'POST') { posted = options; return {ok:true}; }
   if (path === '/api/v1/games') return {ok: true, json: async () => ({revision:3,write_enabled:true,games: [
-    {id:'a', name:'<script>game</script>', builds:[{id:'1',version:'1.9',status:'experimental',evidence:null,capabilities:{video:'experimental',input:'unknown'}}]},
+    {id:'a', name:'<script>game</script>', cover_version:'abc', builds:[{id:'1',version:'1.9',status:'experimental',evidence:null,capabilities:{video:'experimental',input:'unknown'}}]},
     {id:'b', name:'Other game', builds:[]},
   ]})};
   return {ok: true, json: async () => ({sampled_at_unix_ms: 1_000_000, endpoints: [
@@ -51,6 +51,16 @@ vm.runInContext(script[1], context);
   const title = nodes['game-list'].children[0].children[0].children[1].children[0];
   assert.equal(title.textContent, '<script>game</script>');
   assert.equal(title.innerHTML, '');
+  const card = nodes['game-list'].children[0];
+  assert.equal(card.children[0].children[0].children[0].src, '/api/v1/covers/a');
+  const actions = card.children[1];
+  assert.equal(actions.children[2].textContent, '更换封面');
+  const image = {size: 100, type:'image/png'};
+  actions.children[3].files = [image];
+  await actions.children[3].change();
+  assert.equal(posted.headers['X-NXBridge-Cover-Version'], 'abc');
+  assert.equal(posted.headers['Content-Type'], 'image/png');
+  assert.equal(posted.body, image);
   const build = nodes['game-list'].children[0].children.find(child => child.className === 'build');
   assert.equal(build.children[0].children[1].textContent, '登记：实验中');
   assert.equal(build.children[1].children[0].textContent, '尚未绑定构建目录');

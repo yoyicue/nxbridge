@@ -17,7 +17,7 @@ use crate::session::stream::video::VideoStreamHandle;
 use crate::session::stream::video::{HdrMetadata, HdrModeState};
 
 mod feedback;
-pub(crate) mod host_input;
+pub mod host_input;
 
 /// Configuration for the control stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -432,6 +432,25 @@ fn send_hdr_state(
 }
 
 #[allow(clippy::too_many_arguments)]
+// Moonlight advertises a 100 ms encrypted control ping for this server
+// version. Reserve part of the 250 ms loss-to-game-neutral target for the
+// control loop, bridge and game sampling. A shorter watchdog trades jitter
+// tolerance for faster release and is not a hard end-to-end guarantee.
+const INPUT_LIVENESS_TIMEOUT: Duration = Duration::from_millis(215);
+struct InputLiveness { last: std::time::Instant, expired: bool }
+impl InputLiveness {
+    fn new(now: std::time::Instant) -> Self { Self { last: now, expired: false } }
+    fn observe(&mut self, now: std::time::Instant) { self.last = now; self.expired = false; }
+    fn remaining(&self, now: std::time::Instant) -> Duration {
+        INPUT_LIVENESS_TIMEOUT.saturating_sub(now.saturating_duration_since(self.last))
+    }
+    fn expire(&mut self, now: std::time::Instant) -> bool {
+        if !self.expired && now.saturating_duration_since(self.last) >= INPUT_LIVENESS_TIMEOUT {
+            self.expired = true; true
+        } else { false }
+    }
+}
+
 async fn run_control_loop(
 	stream_timeout: u64,
 	mut host: Host,
@@ -457,8 +476,13 @@ async fn run_control_loop(
 	let mut audio_triggered = false;
 	// Track which peer slot the client is connected to.
 	let mut connected_peer: Option<tokio_enet::PeerId> = None;
+	let mut input_liveness = InputLiveness::new(std::time::Instant::now());
 
 	while !stop_session_manager.is_shutdown_triggered() {
+        if connected_peer.is_some() && input_liveness.expire(std::time::Instant::now()) {
+            if let Some(input) = input.as_ref() { input.reset(); }
+            tracing::warn!("authenticated control input became silent; neutralizing");
+        }
 		// Check if the timeout has passed.
 		if std::time::Instant::now() > stop_deadline {
 			tracing::info!(
@@ -479,20 +503,29 @@ async fn run_control_loop(
 			sequence_number += 1;
 		}
 
+		// Do not spend the entire 10 ms poll interval past the watchdog deadline.
+		let control_poll = if connected_peer.is_some() && !input_liveness.expired {
+            input_liveness.remaining(std::time::Instant::now()).min(Duration::from_millis(10))
+        } else { Duration::from_millis(10) };
 		match host
-			.service(Duration::from_millis(10))
+			.service(control_poll)
 			.await
 			.map_err(|e| tracing::error!("Failure in enet host: {e}"))
 		{
 			Ok(Some(Event::Connect { peer_id, .. })) => {
-				connected_peer = Some(peer_id);
+                if connected_peer.is_none() {
+                    connected_peer = Some(peer_id);
+                    input_liveness.observe(std::time::Instant::now());
+                }
 			},
 			Ok(Some(Event::Disconnect { peer_id, .. })) => {
 				if connected_peer == Some(peer_id) {
 					connected_peer = None;
+					if let Some(input) = input.as_ref() { input.reset(); }
 				}
 			},
-			Ok(Some(Event::Receive { ref packet, .. })) => {
+			Ok(Some(Event::Receive { peer_id, ref packet, .. })) => {
+                if connected_peer != Some(peer_id) { continue; }
 				let mut control_message = match ControlMessage::from_bytes(packet.data()) {
 					Ok(control_message) => control_message,
 					Err(()) => break,
@@ -501,6 +534,7 @@ async fn run_control_loop(
 
 				// First check for encrypted control messages and decrypt them.
 				let decrypted;
+                let authenticated = matches!(control_message, ControlMessage::Encrypted(_));
 				if let ControlMessage::Encrypted(message) = control_message {
 					let mut initialization_vector = [0u8; 12];
 					initialization_vector[0..4].copy_from_slice(&message.sequence_number.to_le_bytes());
@@ -550,9 +584,13 @@ async fn run_control_loop(
 						send_hdr_mode = context.hdr;
 					},
 					ControlMessage::Ping => {
+                        if !authenticated { continue; }
+                        input_liveness.observe(std::time::Instant::now());
 						stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(stream_timeout);
 					},
 					ControlMessage::InputData(event) => {
+                        if !authenticated { continue; }
+                        input_liveness.observe(std::time::Instant::now());
 						if let Some(input) = input.as_ref() {
 							input.forward(event);
 						}
@@ -622,4 +660,23 @@ async fn run_control_loop(
 	// returns. Without this, the next session's control stream may
 	// fail to bind to the same port.
 	drop(host);
+}
+
+#[cfg(test)]
+mod nxb_input_liveness_tests {
+    use super::*;
+    #[test]
+    fn silence_expires_once_and_authenticated_activity_rearms() {
+        let start = std::time::Instant::now();
+        let mut state = InputLiveness::new(start);
+        assert_eq!(state.remaining(start + Duration::from_millis(205)), Duration::from_millis(10));
+        assert_eq!(state.remaining(start + Duration::from_millis(214)), Duration::from_millis(1));
+        assert!(!state.expire(start + Duration::from_millis(214)));
+        assert!(state.expire(start + Duration::from_millis(215)));
+        assert_eq!(state.remaining(start + Duration::from_secs(1)), Duration::ZERO);
+        assert!(!state.expire(start + Duration::from_secs(2)));
+        state.observe(start + Duration::from_secs(2));
+        assert!(!state.expire(start + Duration::from_millis(2214)));
+        assert!(state.expire(start + Duration::from_millis(2215)));
+    }
 }

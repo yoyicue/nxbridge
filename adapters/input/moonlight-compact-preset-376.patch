@@ -1,0 +1,82 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 375
++        versionCode = 376
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -566,7 +566,6 @@
+                         int dx = 0, dy = 0;
+                         if (which == 0) {
+                             if (element.elementId == VirtualControllerElement.EID_DPAD) dy = -(int)(height * 0.05f);
+-                            if (element.elementId == VirtualControllerElement.EID_BACK || element.elementId == VirtualControllerElement.EID_START) dy = (int)(height * 0.05f);
+                             if (element.elementId == VirtualControllerElement.EID_LB) dx = -(int)(width * 0.01f);
+                             if (element.elementId == VirtualControllerElement.EID_RB) dx = (int)(width * 0.01f);
+                         } else if (which == 2) {
+@@ -577,9 +576,59 @@
+                         p.topMargin = Math.max(0, Math.min(height - p.height, p.topMargin + dy));
+                         element.requestLayout();
+                     }
++                    if (which == 0) compactHandLayout();
+                     constrainElementsToSafeArea();
+-                    editorStatus.setText(choices[which] + " · " + context.getString(R.string.nxb_layout_unsaved));
++                    try {
++                        // Reject the entire candidate rather than saving an unsafe or overlapping preset.
++                        if (profileStore == null) throw new IllegalStateException("layout store unavailable");
++                        profileStore.capture(elements, localHaptics, idleFade, highContrast);
++                        editorStatus.setText(choices[which] + " · " + context.getString(R.string.nxb_layout_unsaved));
++                    } catch (Exception e) {
++                        try { if (undoEdit != null) applyGeometry(undoEdit); } catch (Exception ignored) { }
++                        invalidateElements();
++                        Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
++                    }
+                 }).setNegativeButton(android.R.string.cancel, null).show();
++    }
++
++    /** Candidate for smaller reaches; preserves Switch face-button ordering and touch minimums. */
++    private void compactHandLayout() {
++        VirtualControllerElement top = null, left = null, lb = null, rb = null;
++        for (VirtualControllerElement e : elements) {
++            if (e.elementId == VirtualControllerElement.EID_Y) top = e;
++            else if (e.elementId == VirtualControllerElement.EID_X) left = e;
++            else if (e.elementId == VirtualControllerElement.EID_LB) lb = e;
++            else if (e.elementId == VirtualControllerElement.EID_RB) rb = e;
++        }
++        if (top != null && left != null) {
++            FrameLayout.LayoutParams tp = (FrameLayout.LayoutParams)top.getLayoutParams();
++            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams)left.getLayoutParams();
++            int cx = tp.leftMargin + tp.width / 2, cy = lp.topMargin + lp.height / 2;
++            float density = context.getResources().getDisplayMetrics().density;
++            int size = Math.max((int)Math.ceil(48 * density), Math.round(Math.min(tp.width, tp.height) * 0.8f));
++            int step = size + (int)Math.ceil(4 * density);
++            for (VirtualControllerElement e : elements) {
++                int dx = 0, dy = 0;
++                if (e.elementId == VirtualControllerElement.EID_A) dy = step;
++                else if (e.elementId == VirtualControllerElement.EID_B) dx = step;
++                else if (e.elementId == VirtualControllerElement.EID_X) dx = -step;
++                else if (e.elementId == VirtualControllerElement.EID_Y) dy = -step;
++                else continue;
++                FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++                p.width = size; p.height = size;
++                p.leftMargin = cx + dx - size / 2; p.topMargin = cy + dy - size / 2;
++                e.requestLayout();
++            }
++        }
++        for (VirtualControllerElement e : elements) {
++            VirtualControllerElement shoulder = e.elementId == VirtualControllerElement.EID_BACK ? lb :
++                    e.elementId == VirtualControllerElement.EID_START ? rb : null;
++            if (shoulder == null) continue;
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++            FrameLayout.LayoutParams sp = (FrameLayout.LayoutParams)shoulder.getLayoutParams();
++            p.leftMargin = sp.leftMargin + (sp.width - p.width) / 2;
++            e.requestLayout();
++        }
+     }
+ 
+     private void importLegacy(boolean common) {

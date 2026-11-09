@@ -241,3 +241,181 @@ fn catalog_is_served_by_shared_read_only_http_api() {
     assert!(result.contains("fixture-forest") && result.contains("fixture-puzzle"));
     assert!(result.contains("\"input\":\"unsupported\""));
 }
+
+#[test]
+fn covers_are_validated_versioned_atomic_and_do_not_change_game_identity() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nxbridge-cover-{}-{unique}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("catalog.toml");
+    fs::write(&path, EXAMPLE).unwrap();
+    let store = CatalogStore::writable(&path).unwrap();
+    let png = |color: [u8; 3]| {
+        let mut bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut bytes, 1, 1);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .unwrap()
+                .write_image_data(&color)
+                .unwrap();
+        }
+        bytes
+    };
+    let original = fs::read(&path).unwrap();
+    assert!(store.json().unwrap().contains("\"cover_version\":null"));
+    assert_eq!(store.cover("fixture-forest"), Err(StoreError::Invalid));
+    assert_eq!(
+        store.set_cover("fixture-forest", "", &vec![0; 5 * 1024 * 1024]),
+        Err(StoreError::Invalid)
+    );
+    assert_eq!(
+        store.set_cover("../bad", "", &png([1, 2, 3])),
+        Err(StoreError::Invalid)
+    );
+    assert_eq!(
+        store.set_cover("fixture-forest", "", b"not a png"),
+        Err(StoreError::Invalid)
+    );
+    let a = png([1, 2, 3]);
+    let mut broken = a.clone();
+    broken.truncate(broken.len() - 16);
+    assert_eq!(
+        store.set_cover("fixture-forest", "", &broken),
+        Err(StoreError::Invalid)
+    );
+    let va = store.set_cover("fixture-forest", "", &a).unwrap();
+    assert_eq!(va.len(), 64);
+    assert_eq!(store.cover("fixture-forest").unwrap(), a);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let b = png([4, 5, 6]);
+    assert_eq!(
+        store.set_cover("fixture-forest", "", &b),
+        Err(StoreError::Conflict)
+    );
+    let vb = store.set_cover("fixture-forest", &va, &b).unwrap();
+    assert_ne!(va, vb);
+    assert_eq!(store.cover("fixture-forest").unwrap(), b);
+    assert!(store.json().unwrap().contains(&vb));
+    drop(store);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cover_http_requires_token_and_origin_and_serves_binary() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "nxbridge-cover-http-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("catalog.toml");
+    fs::write(&path, EXAMPLE).unwrap();
+    let store = Arc::new(CatalogStore::writable(&path).unwrap());
+    let listener = bind_local(0).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || serve_store(listener, vec![], store).unwrap());
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, 1, 1);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .unwrap()
+            .write_image_data(&[1, 2, 3])
+            .unwrap();
+    }
+    let upload = |extra: &str| {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        write!(stream, "POST /api/v1/covers/fixture-forest HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nX-NXBridge-Cover-Version: \r\n{}\r\n", png.len(), extra).unwrap();
+        stream.write_all(&png).unwrap();
+        let mut result = String::new();
+        stream.read_to_string(&mut result).unwrap();
+        result
+    };
+    assert!(upload("").starts_with("HTTP/1.1 403"));
+    assert!(
+        upload("X-NXBridge-Request: 1\r\nOrigin: https://outside.example\r\n")
+            .starts_with("HTTP/1.1 403")
+    );
+    assert!(upload("X-NXBridge-Request: 1\r\n").starts_with("HTTP/1.1 200"));
+    assert!(upload("X-NXBridge-Request: 1\r\n").starts_with("HTTP/1.1 409"));
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    write!(
+        stream,
+        "GET /api/v1/covers/fixture-forest HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+    )
+    .unwrap();
+    let mut reply = Vec::new();
+    stream.read_to_end(&mut reply).unwrap();
+    assert_eq!(
+        &reply[reply.windows(4).position(|x| x == b"\r\n\r\n").unwrap() + 4..],
+        &png
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn competing_cover_replacements_do_not_lose_an_update() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "nxbridge-cover-race-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("catalog.toml");
+    fs::write(&path, EXAMPLE).unwrap();
+    let store = Arc::new(CatalogStore::writable(&path).unwrap());
+    let png = |value: u8| {
+        let mut bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut bytes, 1, 1);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .unwrap()
+                .write_image_data(&[value, 2, 3])
+                .unwrap();
+        }
+        bytes
+    };
+    let version = store.set_cover("fixture-forest", "", &png(1)).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let threads: Vec<_> = [2, 3]
+        .into_iter()
+        .map(|v| {
+            let (s, b, version, data) = (
+                Arc::clone(&store),
+                Arc::clone(&barrier),
+                version.clone(),
+                png(v),
+            );
+            thread::spawn(move || {
+                b.wait();
+                s.set_cover("fixture-forest", &version, &data)
+            })
+        })
+        .collect();
+    barrier.wait();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| **r == Err(StoreError::Conflict))
+            .count(),
+        1
+    );
+    drop(store);
+    fs::remove_dir_all(dir).unwrap();
+}

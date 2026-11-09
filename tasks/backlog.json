@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-05",
+  "updated_at": "2026-11-09",
   "execution_policy": "single_active_agent_by_default",
   "tasks": [
     {
@@ -1075,6 +1075,380 @@
         "vendor/fec-rs/src/nxbridge_tests.rs",
         "vendor/moonshine-core/src/session/stream/video/scheduling_tests.rs",
         "tests/nxnative_video_queue.m"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-112",
+      "title": "改进 Pad 小手触屏手柄布局",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-047"
+      ],
+      "scope": [
+        "adapters/input/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "改进小手可达性、Switch 按键布局、方向键与按下反馈，保留自定义布局及原生输入通道",
+        "在两台 Pad 验证升级、布局及基础和多点组合输入；真实握持手感单独确认",
+        "记录构建、设备设置、恢复方式与已知限制",
+        "提供默认隐藏的浮动摇杆及独立可调整触摸区，保留固定模式、自定义配置、按键优先和断线回中；逐台验证"
+      ],
+      "evidence": [
+        "docs/reports/NXB-112.md"
+      ],
+      "blockers": [
+        "第一台 Pad 的网络控制连接曾失败；浮动触控与真实握持需要重新验证。"
+      ]
+    },
+    {
+      "id": "NXB-113",
+      "title": "为单游戏入口配置标题与本地封面",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-032",
+        "NXB-041"
+      ],
+      "scope": [
+        "crates/nxbridge-gamestream/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "单游戏 GameStream 入口支持配置标题和本地封面，默认值与合成源保持兼容，不打包游戏资源",
+        "在 1402 验证已有 BOTW 入口名称与封面，保留配对身份及存档",
+        "记录未来多游戏入口、游戏启动路由及隔离仍未实现"
+      ],
+      "evidence": [
+        "docs/reports/NXB-113.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-115",
+      "title": "准备王国之泪独立构建与双游戏入口",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-010",
+        "NXB-113"
+      ],
+      "scope": [
+        "adapters/nxnative/",
+        "crates/nxbridge-gamestream/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "在独立引擎副本处理含本体和更新的 XCI，核实游戏版本及构建，保留来源和测试证据",
+        "准备与 BOTW 隔离的游戏构建及存档，逐项验证可启动性",
+        "提供按游戏选择的串流入口并验证路由隔离，明确尚未验证的输入、保存、重连和性能"
+      ],
+      "evidence": [
+        "docs/reports/NXB-115.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-118",
+      "title": "游戏启动首帧加载界面",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-115",
+        "NXB-117"
+      ],
+      "scope": [
+        "adapters/input/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "连接、首帧与启动黑帧等待期间显示加载界面，画面可见或超时后切换，支持退出和连接失败提示",
+        "保留已有游戏库、触屏布局、配对及存档；在实际设备验证启动和退出",
+        "客户端补丁可重放，完成相关测试及 make check"
+      ],
+      "evidence": [
+        "docs/reports/NXB-118.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-117",
+      "title": "游戏库封面管理与客户端自动刷新",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-041",
+        "NXB-115",
+        "NXB-116"
+      ],
+      "scope": [
+        "crates/nxbridge-host/",
+        "crates/nxbridge-gamestream/",
+        "vendor/moonshine-core/",
+        "adapters/input/",
+        "web/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "封面由游戏库安全管理和更新，旧游戏库兼容，游戏身份与存档不随封面变化",
+        "串流服务从游戏库获取封面，客户端自动识别更新，后续换图无需重新安装 APK 或手动清缓存",
+        "现有 BOTW 和 TOTK 封面迁入并保留原图，1402 与第二台设备真实验证换图、刷新和游戏入口",
+        "对旧版 Moonlight 和断网、竞态、无封面情况说明兼容边界，完成相关测试及 make check"
+      ],
+      "evidence": [
+        "docs/reports/NXB-117.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-116",
+      "title": "统一 BOTW 和 TOTK 游戏封面标识",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-113",
+        "NXB-114",
+        "NXB-115"
+      ],
+      "scope": [
+        "docs/",
+        "本机游戏封面及 Pad 缓存"
+      ],
+      "acceptance": [
+        "使用未经编辑的现成竖版 BOTW 封面，使其与 TOTK 封面均带 Switch 标识，保留原图及来源",
+        "更新主机图片并在两台 Pad 刷新目标游戏缓存，核验显示比例和内容",
+        "保留旧图片缓存、记录设备在线状态与恢复方式"
+      ],
+      "evidence": [
+        "docs/reports/NXB-116.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-114",
+      "title": "修复 Pad 游戏封面比例和图片缓存",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-113"
+      ],
+      "scope": [
+        "adapters/input/",
+        "docs/"
+      ],
+      "acceptance": [
+        "游戏封面按比例解码并适配竖向卡片，避免拉伸和内嵌黑边",
+        "两台 Pad 保留原应用数据并验证封面显示，备份和刷新对应图片缓存",
+        "记录图片来源及非公开资产、验证和限制"
+      ],
+      "evidence": [
+        "docs/reports/NXB-114.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-120",
+      "title": "虚拟手柄编辑事务与游戏布局",
+      "priority": "P1",
+      "status": "in_progress",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-119",
+        "NXB-118"
+      ],
+      "scope": [
+        "adapters/input/",
+        "vendor/moonshine-core/",
+        "crates/nxbridge-gamestream/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "提供游戏库和游戏内共用的明确布局编辑、预览、试按、保存、取消、恢复以及安全区校验",
+        "布局以稳定游戏身份和设备方向隔离；保留旧通用布局并支持可恢复迁移；配置变更失败不破坏原数据",
+        "编辑与试按不发送游戏输入，进入和退出时清空旧触点，实体控制输入不能泄漏",
+        "两台 Pad 验证升级、编辑保存和游戏隔离；多点与真实握持限制如实报告"
+      ],
+      "evidence": [
+        "docs/reports/NXB-120.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-121",
+      "title": "虚拟手柄手型预设与操作反馈",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-120"
+      ],
+      "scope": [
+        "adapters/input/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "提供可调整的小手、标准及大屏预设，明确热区、可视状态、按下反馈和独立摇杆曲线",
+        "支持高对比度、淡出与本地轻反馈；实体与游戏震动互不混淆",
+        "两台设备及真实握持测试覆盖误触、组合、HUD 遮挡与恢复，保留证据"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-122",
+      "title": "输入快照、来源仲裁与工作台",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-120"
+      ],
+      "scope": [
+        "adapters/input/",
+        "crates/nxbridge-gamestream/",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "实现按会话和代次隔离的按钮与轴一致快照，短按边沿有界保序，明确触屏和实体手柄仲裁",
+        "进入编辑、取消、后台、断线、重连及代次变化时中和对应来源；旧状态不能复活",
+        "复用生产输入组件提供工作台与观测，完成组合、故障、双会话隔离及采样边界验证；剩余 NXB-050 的完整依赖与验收单列"
+      ],
+      "evidence": [],
+      "blockers": []
+    },
+    {
+      "id": "NXB-119",
+      "title": "整理虚拟手柄完整优化设计",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-048"
+      ],
+      "scope": [
+        "docs/virtual-controller-optimization.md",
+        "README.md",
+        "docs/status.md",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "在单独 Markdown 中覆盖触屏交互、UI、布局配置、agent 调整、输入可靠性与动作宏边界",
+        "依据固定 S2Arm 修订和 NXBridge 当前代码区分已有能力、拟实现项及验收，包含多会话隔离和实施顺序",
+        "补充文档入口并通过 make check；仅交付设计，不变更运行代码或测试设备"
+      ],
+      "evidence": [
+        "docs/virtual-controller-optimization.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-123",
+      "title": "完整显示游戏库封面",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-117"
+      ],
+      "scope": [
+        "adapters/input/",
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "Pad 游戏封面按比例完整显示，保留图片边缘标识与分级，布局入口不遮挡图片",
+        "确认游戏库保留用户上传的原始 PNG，两个 Pad 的游戏入口和配对不变",
+        "验证大小卡片、构建重放、设备显示与 make check，并记录限制"
+      ],
+      "evidence": [
+        "docs/reports/NXB-123.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-124",
+      "title": "为 1372 增加独立的王国之泪入口",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-115",
+        "NXB-117"
+      ],
+      "scope": [
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "1372 保留 BOTW 入口并显示 TOTK 及其游戏库封面",
+        "TOTK 与其他玩家及游戏使用独立存档和临时目录，原存档备份校验",
+        "检查服务与设备入口、记录可用性及未验收限制"
+      ],
+      "evidence": [
+        "docs/reports/NXB-124.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-125",
+      "title": "更新游戏主机显示名称",
+      "priority": "P2",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-115"
+      ],
+      "scope": [
+        "crates/nxbridge-gamestream/",
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "游戏主机默认名称为 NXBridge Games，合成源与游戏条目名称保持原有行为",
+        "1402 的配对主机实际显示 NXBridge Games，已有游戏入口及会话保持可用",
+        "检查服务状态、相关测试与 make check"
+      ],
+      "evidence": [
+        "docs/reports/NXB-125.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-126",
+      "title": "更新 1372 主机显示名称",
+      "priority": "P2",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-124"
+      ],
+      "scope": [
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "1372 主机显示 NXBridge Padx2 Experiment，配对身份和两款游戏入口保留",
+        "服务空闲时更新并验证 Pad 显示，执行项目检查"
+      ],
+      "evidence": [
+        "docs/reports/NXB-126.md"
       ],
       "blockers": []
     }

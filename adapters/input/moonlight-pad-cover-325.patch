@@ -1,0 +1,73 @@
+--- a/app/src/main/res/layout/app_grid_item.xml
++++ b/app/src/main/res/layout/app_grid_item.xml
+@@ -1,12 +1,12 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:layout_width="150dp"
+-    android:layout_height="200dp"
++    android:layout_height="215dp"
+     android:padding="10dp">
+     <ImageView
+         android:id="@+id/grid_image"
+         android:cropToPadding="false"
+-        android:scaleType="fitXY"
++        android:scaleType="centerCrop"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent">
+     </ImageView>
+--- a/app/src/main/res/layout/app_grid_item_small.xml
++++ b/app/src/main/res/layout/app_grid_item_small.xml
+@@ -1,12 +1,12 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:layout_width="100dp"
+-    android:layout_height="133dp"
++    android:layout_height="145dp"
+     android:padding="5dp">
+     <ImageView
+         android:id="@+id/grid_image"
+         android:cropToPadding="false"
+-        android:scaleType="fitXY"
++        android:scaleType="centerCrop"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent">
+     </ImageView>
+--- a/app/src/main/java/com/limelight/grid/assets/DiskAssetLoader.java
++++ b/app/src/main/java/com/limelight/grid/assets/DiskAssetLoader.java
+@@ -19,9 +19,9 @@
+     // 5 MB
+     private static final long MAX_ASSET_SIZE = 5 * 1024 * 1024;
+ 
+-    // Standard box art is 300x400
++    // Decode within the card bounds without distorting the source aspect ratio.
+     private static final int STANDARD_ASSET_WIDTH = 300;
+-    private static final int STANDARD_ASSET_HEIGHT = 400;
++    private static final int STANDARD_ASSET_HEIGHT = 450;
+ 
+     private final boolean isLowRamDevice;
+     private final File cacheDir;
+@@ -117,7 +117,12 @@
+                         scaledBitmap.originalWidth = imageInfo.getSize().getWidth();
+                         scaledBitmap.originalHeight = imageInfo.getSize().getHeight();
+ 
+-                        imageDecoder.setTargetSize(STANDARD_ASSET_WIDTH, STANDARD_ASSET_HEIGHT);
++                        int width = imageInfo.getSize().getWidth();
++                        int height = imageInfo.getSize().getHeight();
++                        float scale = Math.min((float) STANDARD_ASSET_WIDTH / width,
++                                (float) STANDARD_ASSET_HEIGHT / height);
++                        imageDecoder.setTargetSize(Math.max(1, Math.round(width * scale)),
++                                Math.max(1, Math.round(height * scale)));
+                         if (isLowRamDevice) {
+                             imageDecoder.setMemorySizePolicy(ImageDecoder.MEMORY_POLICY_LOW_RAM);
+                         }
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 324
++        versionCode = 325
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'

@@ -1,41 +1,67 @@
-//! Forwarding client input to the host.
-//!
-//! The control stream decrypts and length-checks the client's `InputData`
-//! messages and would otherwise drop them. This hands the payload to the host,
-//! which owns the decision of what an input event means on this device (see
-//! `rgsp_host::input`); nothing here interprets the bytes.
-//!
-//! Kept in its own file, like the video and audio `host_source` modules, so the
-//! surrounding upstream code stays mergeable.
+//! Nonblocking, bounded handoff of authenticated client input to the host.
+//! Overflow advances an epoch so the host can neutralize and discard stale data.
+use tokio::sync::{mpsc, watch};
 
-use tokio::sync::mpsc;
+#[derive(Debug)]
+pub struct InputPacket {
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+}
 
-/// Sender half handed to the control loop. Cloneable so a resumed session can
-/// keep feeding the same host-side receiver.
+/// One receiver per GameStream session. Overflow notifications have priority
+/// over queued packets at the consumer; an old epoch must never be replayed.
+pub struct InputReceiver {
+    pub events: mpsc::Receiver<InputPacket>,
+    pub overflow: watch::Receiver<u64>,
+}
+
 #[derive(Clone)]
 pub(crate) struct InputForwarder {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<InputPacket>,
+    overflow: watch::Sender<u64>,
 }
 
 impl InputForwarder {
-    pub(crate) fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
-        Self { tx }
+    pub(crate) fn channel(capacity: usize) -> (Self, InputReceiver) {
+        let (tx, events) = mpsc::channel(capacity);
+        let (overflow, notices) = watch::channel(0);
+        (Self { tx, overflow }, InputReceiver { events, overflow: notices })
     }
 
-    /// Hand one input payload to the host.
-    ///
-    /// Drops rather than blocks when the queue is full. Input is a stream of
-    /// absolute state - every packet carries the complete set of buttons held
-    /// at that instant - so a dropped packet costs at most a few milliseconds
-    /// of staleness, and the next one restores the truth. Blocking the control
-    /// loop instead would stall pings and IDR requests, which is far worse.
-    ///
-    /// A release can be dropped as easily as a press, so the host must not
-    /// treat the last packet it saw as authoritative forever; it releases
-    /// everything when the session ends.
+    /// Invalidate every previously queued state on control-peer loss.
+    pub(crate) fn reset(&self) {
+        self.overflow.send_modify(|e| *e = e.saturating_add(1));
+    }
+
     pub(crate) fn forward(&self, payload: &[u8]) {
-        if self.tx.try_send(payload.to_vec()).is_err() {
-            tracing::trace!("input queue full or closed, dropping one packet");
+        let epoch = *self.overflow.borrow();
+        match self.tx.try_send(InputPacket { epoch, payload: payload.to_vec() }) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {},
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.reset();
+                tracing::warn!("input handoff overflow; neutralizing and discarding old epoch");
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn overflow_advances_epoch_without_blocking_control() {
+        let (sender, mut receiver) = InputForwarder::channel(1);
+        sender.forward(&[1]);
+        sender.forward(&[0]); // release cannot be silently dropped
+        receiver.overflow.changed().await.unwrap();
+        assert_eq!(*receiver.overflow.borrow_and_update(), 1);
+        assert_eq!(receiver.events.recv().await.unwrap().epoch, 0);
+        sender.forward(&[0]);
+        let next = receiver.events.recv().await.unwrap();
+        assert_eq!(next.epoch, 1);
+        assert_eq!(next.payload, vec![0]);
+        sender.reset();
+        receiver.overflow.changed().await.unwrap();
+        assert_eq!(*receiver.overflow.borrow_and_update(), 2);
     }
 }

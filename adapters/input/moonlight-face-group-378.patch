@@ -1,0 +1,178 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 377
++        versionCode = 378
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -121,6 +121,8 @@
+     private HashMap<String, JSONObject> undoEdit;
+     private LinearLayout editorBar;
+     private TextView editorStatus;
++    private Button faceGroupButton;
++    private boolean faceGroupMove;
+     private Runnable editorFinished;
+ 
+     public boolean isSaving() { return saving; }
+@@ -377,6 +379,43 @@
+             if (geometry != null) e.loadConfiguration(geometry);
+         }
+     }
++    static boolean isFaceButton(VirtualControllerElement e) {
++        return e.elementId >= VirtualControllerElement.EID_A && e.elementId <= VirtualControllerElement.EID_Y;
++    }
++    boolean faceGroupSelected(VirtualControllerElement e) {
++        return faceGroupMove && currentMode == ControllerMode.MoveButtons && isFaceButton(e);
++    }
++    private void updateFaceGroupButton() {
++        if (faceGroupButton != null) faceGroupButton.setText(faceGroupMove ? R.string.nxb_face_group_on : R.string.nxb_face_group_off);
++    }
++    /** Return true when the movement was handled as a group, including a blocked drag. */
++    boolean moveFaceGroup(VirtualControllerElement selected, int dx, int dy) {
++        if (!faceGroupSelected(selected)) return false;
++        java.util.ArrayList<VirtualControllerElement> members = new java.util.ArrayList<>();
++        java.util.ArrayList<int[]> obstacles = new java.util.ArrayList<>();
++        for (VirtualControllerElement e : elements) {
++            if (!e.isControlEnabled()) continue;
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++            if (isFaceButton(e)) members.add(e);
++            else if (!(e instanceof AnalogStick && ((AnalogStick)e).isFloating()))
++                obstacles.add(new int[]{p.leftMargin, p.topMargin, p.width, p.height});
++        }
++        if (members.size() != 4) return true;
++        int[][] group = new int[4][];
++        for (int i = 0; i < 4; i++) {
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)members.get(i).getLayoutParams();
++            group[i] = new int[]{p.leftMargin, p.topMargin, p.width, p.height};
++        }
++        LayoutSafeArea safe = safeArea(); int gear = (int)(layoutHeight() * 0.06f);
++        obstacles.add(new int[]{safe.left + 15, safe.top + 15, gear, gear});
++        int[] delta = FaceGroupMovement.clamp(group, obstacles.toArray(new int[0][]),
++                safe.left, safe.top, safe.right, safe.bottom, dx, dy);
++        for (VirtualControllerElement e : members) {
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++            p.leftMargin += delta[0]; p.topMargin += delta[1]; e.requestLayout();
++        }
++        return true;
++    }
+     void beginElementEdit(VirtualControllerElement element) {
+         if (!isEditing() || saving || currentMode == ControllerMode.TestButtons) return;
+         try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
+@@ -384,6 +423,7 @@
+                 element.elementId == VirtualControllerElement.EID_LS ? context.getString(R.string.nxb_layout_left_stick) :
+                 element.elementId == VirtualControllerElement.EID_RS ? context.getString(R.string.nxb_layout_right_stick) :
+                 context.getString(R.string.nxb_layout_dpad);
++        if (faceGroupSelected(element)) name = context.getString(R.string.nxb_face_group_name);
+         if (editorStatus != null) editorStatus.setText(name + " · " + element.getWidth() + "×" + element.getHeight() + " · " + context.getString(R.string.nxb_layout_unsaved));
+     }
+     private void undoEdit() {
+@@ -497,6 +537,18 @@
+         LinearLayout row = new LinearLayout(context); row.setGravity(Gravity.CENTER_VERTICAL);
+         addEditorButton(row, R.string.nxb_layout_presets, this::choosePreset);
+         addEditorButton(row, R.string.nxb_layout_move, () -> setEditMode(ControllerMode.MoveButtons));
++        boolean hasFace = false;
++        for (VirtualControllerElement e : elements) if (isFaceButton(e)) { hasFace = true; break; }
++        if (hasFace) {
++            faceGroupMove = false;
++            faceGroupButton = new Button(context); faceGroupButton.setAllCaps(false); updateFaceGroupButton();
++            faceGroupButton.setOnClickListener(v -> {
++                if (saving) return;
++                faceGroupMove = !faceGroupMove;
++                setEditMode(ControllerMode.MoveButtons); updateFaceGroupButton(); invalidateElements();
++            });
++            row.addView(faceGroupButton);
++        }
+         addEditorButton(row, R.string.nxb_layout_size, () -> setEditMode(ControllerMode.ResizeButtons));
+         addEditorButton(row, R.string.nxb_layout_curve, this::editCurves);
+         addEditorButton(row, R.string.nxb_layout_haptic, this::editHaptics);
+@@ -530,6 +582,7 @@
+     private void setEditMode(ControllerMode mode) {
+         if (!isEditing() || saving) return;
+         releaseAll(); currentMode = mode;
++        if (mode != ControllerMode.MoveButtons) { faceGroupMove = false; updateFaceGroupButton(); }
+         editorStatus.setText(mode == ControllerMode.TestButtons ? context.getString(R.string.nxb_layout_test_hint) : context.getString(R.string.nxb_layout_unsaved));
+         invalidateElements();
+     }
+@@ -797,7 +850,7 @@
+         currentMode = ControllerMode.Active;
+         if (editorBar != null) frame_layout.removeView(editorBar);
+         if (safeAreaOutline != null) { frame_layout.removeView(safeAreaOutline); safeAreaOutline = null; }
+-        editorBar = null; beforeEdit = null; undoEdit = null;
++        editorBar = null; faceGroupButton = null; faceGroupMove = false; beforeEdit = null; undoEdit = null;
+         buttonConfigure.setVisibility(View.VISIBLE); buttonConfigure.bringToFront();
+         if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
+         invalidateElements(); refreshElementVisibility();
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -109,6 +109,7 @@
+         int newPos_y = (int) getY() + y - pressed_y;
+ 
+         FrameLayout.LayoutParams layoutParams = (FrameLayout.LayoutParams) getLayoutParams();
++        if (virtualController.moveFaceGroup(this, newPos_x - layoutParams.leftMargin, newPos_y - layoutParams.topMargin)) return;
+ 
+         LayoutSafeArea safe = virtualController.safeArea();
+         layoutParams.leftMargin = Math.max(safe.left, Math.min(newPos_x, safe.right - layoutParams.width));
+@@ -137,7 +138,7 @@
+     protected void onDraw(Canvas canvas) {
+         onElementDraw(canvas);
+ 
+-        if (currentMode != Mode.Normal) {
++        if (currentMode != Mode.Normal || virtualController.faceGroupSelected(this)) {
+             paint.setColor(configSelectedColor);
+             paint.setStrokeWidth(getDefaultStrokeWidth());
+             paint.setStyle(Paint.Style.STROKE);
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -392,4 +392,7 @@
+     <string name="nxb_portable_export_done">Layout draft exported.</string>
+     <string name="nxb_portable_restored">Previous draft restored · not saved</string>
+     <string name="nxb_release_controller_key">Release the controller button, then press it again.</string>
++    <string name="nxb_face_group_off">Face group: Off</string>
++    <string name="nxb_face_group_on">Face group: On</string>
++    <string name="nxb_face_group_name">Face buttons</string>
+ </resources>
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -373,4 +373,7 @@
+     <string name="nxb_portable_export_done">布局草稿已导出。</string>
+     <string name="nxb_portable_restored">已恢复之前的草稿 · 未保存</string>
+     <string name="nxb_release_controller_key">请松开手柄按键，再按一次。</string>
++    <string name="nxb_face_group_off">面键联动：关</string>
++    <string name="nxb_face_group_on">面键联动：开</string>
++    <string name="nxb_face_group_name">面键组</string>
+ </resources>
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/FaceGroupMovement.java
+@@ -0,0 +1,26 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Move a set of hit rectangles as one, preserving all relative offsets. */
++public final class FaceGroupMovement {
++    private FaceGroupMovement() { }
++
++    public static int[] clamp(int[][] group, int[][] obstacles, int left, int top, int right, int bottom, int dx, int dy) {
++        if (group == null || group.length != 4 || obstacles == null || right <= left || bottom <= top) return new int[]{0, 0};
++        long minX = Long.MIN_VALUE, maxX = Long.MAX_VALUE, minY = Long.MIN_VALUE, maxY = Long.MAX_VALUE;
++        for (int[] r : group) {
++            if (r == null || r.length != 4 || r[2] <= 0 || r[3] <= 0) return new int[]{0, 0};
++            minX = Math.max(minX, (long)left - r[0]); maxX = Math.min(maxX, (long)right - r[0] - r[2]);
++            minY = Math.max(minY, (long)top - r[1]); maxY = Math.min(maxY, (long)bottom - r[1] - r[3]);
++        }
++        if (minX > maxX || minY > maxY) return new int[]{0, 0};
++        long x = Math.max(minX, Math.min((long)dx, maxX));
++        long y = Math.max(minY, Math.min((long)dy, maxY));
++        if (x < Integer.MIN_VALUE || x > Integer.MAX_VALUE || y < Integer.MIN_VALUE || y > Integer.MAX_VALUE) return new int[]{0, 0};
++        for (int[] g : group) for (int[] o : obstacles) {
++            if (o == null || o.length != 4 || o[2] <= 0 || o[3] <= 0) return new int[]{0, 0};
++            long gx = (long)g[0] + x, gy = (long)g[1] + y;
++            if (gx < (long)o[0] + o[2] && gx + g[2] > o[0] && gy < (long)o[1] + o[3] && gy + g[3] > o[1]) return new int[]{0, 0};
++        }
++        return new int[]{(int)x, (int)y};
++    }
++}

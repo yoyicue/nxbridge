@@ -1,0 +1,37 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 366
++        versionCode = 367
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -41,6 +41,7 @@
+ 
+     protected VirtualController virtualController;
+     protected final int elementId;
++    private final boolean nxbBenchmarkSkipDraw;
+ 
+     private final Paint paint = new Paint();
+ 
+@@ -99,6 +100,7 @@
+ 
+     protected VirtualControllerElement(VirtualController controller, Context context, int elementId) {
+         super(context);
++        nxbBenchmarkSkipDraw = android.preference.PreferenceManager.getDefaultSharedPreferences(context).getBoolean("nxb_benchmark_skip_draw", false);
+ 
+         this.virtualController = controller;
+         this.elementId = elementId;
+@@ -135,6 +137,7 @@
+ 
+     @Override
+     protected void onDraw(Canvas canvas) {
++        if (nxbBenchmarkSkipDraw) return; // Diagnostic-only A/B: preserve touch routing and invalidation.
+         onElementDraw(canvas);
+ 
+         if (currentMode != Mode.Normal) {

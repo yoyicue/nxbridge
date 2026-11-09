@@ -1,0 +1,335 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 327
++        versionCode = 331
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -118,6 +118,11 @@
+ 
+     private NvConnection conn;
+     private SpinnerDialog spinner;
++    private View nxbLoading;
++    private TextView nxbLoadingMessage;
++    private final Handler nxbLoadingHandler = new Handler(android.os.Looper.getMainLooper());
++    private long nxbVisibleFrameDeadline;
++    private boolean nxbWaitingForVisibleFrame;
+     private boolean displayedFailureDialog = false;
+     private boolean connecting = false;
+     private boolean connected = false;
+@@ -211,9 +216,9 @@
+         // Inflate the content
+         setContentView(R.layout.activity_game);
+ 
+-        // Start the spinner
+-        spinner = SpinnerDialog.displayDialog(this, getResources().getString(R.string.conn_establishing_title),
+-                getResources().getString(R.string.conn_establishing_msg), true);
++        nxbLoading = findViewById(R.id.nxbLoading);
++        nxbLoadingMessage = findViewById(R.id.nxbLoadingMessage);
++        findViewById(R.id.nxbLoadingCancel).setOnClickListener(v -> finish());
+ 
+         // Read the stream preferences
+         prefConfig = PreferenceConfiguration.readPreferences(this);
+@@ -392,6 +397,7 @@
+                 willStreamHdr,
+                 glPrefs.glRenderer,
+                 this);
++        decoderRenderer.setFirstFrameListener(() -> runOnUiThread(this::nxbWaitForVisibleFrame));
+ 
+         // Don't stream HDR if the decoder can't support it
+         if (willStreamHdr && !decoderRenderer.isHevcMain10Hdr10Supported() && !decoderRenderer.isAv1Main10Supported()) {
+@@ -510,7 +516,8 @@
+                     (FrameLayout)streamView.getParent(),
+                     this);
+             virtualController.refreshLayout();
+-            virtualController.show();
++            virtualController.hide();
++            nxbLoading.bringToFront();
+         }
+ 
+         if (prefConfig.usbDriver) {
+@@ -520,6 +527,7 @@
+         }
+ 
+         if (!decoderRenderer.isAvcSupported()) {
++            nxbLoading.setVisibility(View.GONE);
+             if (spinner != null) {
+                 spinner.dismiss();
+                 spinner = null;
+@@ -535,6 +543,56 @@
+         streamView.getHolder().addCallback(this);
+     }
+ 
++    private void nxbFinishLoading() {
++        if (isFinishing() || displayedFailureDialog || nxbLoading.getVisibility() != View.VISIBLE) return;
++        nxbLoading.setVisibility(View.GONE);
++        if (virtualController != null && !isHidingOverlays) virtualController.show();
++    }
++
++    private void nxbWaitForVisibleFrame() {
++        if (isFinishing() || displayedFailureDialog || nxbWaitingForVisibleFrame ||
++                nxbLoading.getVisibility() != View.VISIBLE) return;
++        nxbWaitingForVisibleFrame = true;
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
++            nxbFinishLoading();
++            return;
++        }
++        nxbVisibleFrameDeadline = android.os.SystemClock.uptimeMillis() + 8000;
++        // Black can be intentional; never hide the game indefinitely.
++        nxbLoadingHandler.postDelayed(this::nxbFinishLoading, 8000);
++        nxbSampleVisibleFrame();
++    }
++
++    private void nxbSampleVisibleFrame() {
++        if (isFinishing() || displayedFailureDialog || nxbLoading.getVisibility() != View.VISIBLE) return;
++        if (android.os.SystemClock.uptimeMillis() >= nxbVisibleFrameDeadline) {
++            nxbFinishLoading();
++            return;
++        }
++        if (!streamView.getHolder().getSurface().isValid()) {
++            nxbLoadingHandler.postDelayed(this::nxbSampleVisibleFrame, 250);
++            return;
++        }
++        android.graphics.Bitmap probe = android.graphics.Bitmap.createBitmap(32, 18, android.graphics.Bitmap.Config.ARGB_8888);
++        try {
++            android.view.PixelCopy.request(streamView, probe, result -> {
++                boolean visible = false;
++                if (result == android.view.PixelCopy.SUCCESS) {
++                    int[] pixels = new int[32 * 18];
++                    probe.getPixels(pixels, 0, 32, 0, 0, 32, 18);
++                    visible = com.limelight.binding.video.StartupFrameDetector.hasVisibleContent(pixels);
++                }
++                probe.recycle();
++                if (visible) nxbFinishLoading();
++                else if (!isFinishing() && !displayedFailureDialog && nxbLoading.getVisibility() == View.VISIBLE)
++                    nxbLoadingHandler.postDelayed(this::nxbSampleVisibleFrame, 250);
++            }, nxbLoadingHandler);
++        } catch (IllegalArgumentException | IllegalStateException e) {
++            probe.recycle();
++            nxbLoadingHandler.postDelayed(this::nxbSampleVisibleFrame, 250);
++        }
++    }
++
+     private void setPreferredOrientationForCurrentDisplay() {
+         Display display = getWindowManager().getDefaultDisplay();
+ 
+@@ -584,6 +642,10 @@
+         if (virtualController != null) {
+             // Refresh layout of OSC for possible new screen size
+             virtualController.refreshLayout();
++            if (nxbLoading != null && nxbLoading.getVisibility() == View.VISIBLE) {
++                virtualController.hide();
++                nxbLoading.bringToFront();
++            }
+         }
+ 
+         // Hide on-screen overlays in PiP mode
+@@ -609,7 +671,7 @@
+ 
+                 // Restore overlays to previous state when leaving PiP
+ 
+-                if (virtualController != null) {
++                if (virtualController != null && nxbLoading.getVisibility() != View.VISIBLE) {
+                     virtualController.show();
+                 }
+ 
+@@ -2262,6 +2324,7 @@
+                     spinner = null;
+                 }
+ 
++                nxbLoading.setVisibility(View.GONE);
+                 if (!displayedFailureDialog) {
+                     displayedFailureDialog = true;
+                     LimeLog.severe(stage + " failed: " + errorCode);
+@@ -2298,6 +2361,7 @@
+         runOnUiThread(new Runnable() {
+             @Override
+             public void run() {
++                nxbLoading.setVisibility(View.GONE);
+                 // Let the display go to sleep now
+                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+ 
+@@ -2411,6 +2475,8 @@
+                     spinner = null;
+                 }
+ 
++                if (nxbLoading.getVisibility() == View.VISIBLE)
++                    nxbLoadingMessage.setText(R.string.nxb_loading_waiting);
+                 connected = true;
+                 connecting = false;
+                 updatePipAutoEnter();
+@@ -2515,6 +2581,7 @@
+             UiHelper.notifyStreamConnecting(Game.this);
+ 
+             decoderRenderer.setRenderTarget(holder);
++            connecting = true;
+             conn.start(new AndroidAudioRenderer(Game.this, prefConfig.enableAudioFx),
+                     decoderRenderer, Game.this);
+         }
+diff --git a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+--- a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
++++ b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+@@ -8,6 +8,7 @@
+ import java.util.List;
+ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ import org.jcodec.codecs.h264.H264Utils;
+ import org.jcodec.codecs.h264.io.model.SeqParameterSet;
+@@ -41,6 +42,20 @@
+ 
+     private static final boolean USE_FRAME_RENDER_TIME = false;
+     private static final boolean FRAME_RENDER_TIME_ONLY = USE_FRAME_RENDER_TIME && false;
++    private final AtomicBoolean nxbFirstSubmitted = new AtomicBoolean();
++    private final AtomicBoolean nxbFirstShown = new AtomicBoolean();
++    private volatile Runnable nxbFirstFrameListener;
++    public void setFirstFrameListener(Runnable listener) { nxbFirstFrameListener = listener; }
++    private void nxbFirstFrameShown() {
++        Runnable listener = nxbFirstFrameListener;
++        if (listener != null && nxbFirstShown.compareAndSet(false, true)) listener.run();
++    }
++    private void nxbFrameSubmitted() {
++        if (nxbFirstSubmitted.compareAndSet(false, true)) {
++            // Some codec implementations omit render callbacks. Never block playback forever.
++            activity.runOnUiThread(() -> new android.os.Handler().postDelayed(this::nxbFirstFrameShown, 500));
++        }
++    }
+ 
+     private MediaCodecInfo avcDecoder;
+     private MediaCodecInfo hevcDecoder;
+@@ -657,10 +672,15 @@
+             }
+         }
+ 
+-        if (USE_FRAME_RENDER_TIME && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+             videoDecoder.setOnFrameRenderedListener(new MediaCodec.OnFrameRenderedListener() {
+                 @Override
+                 public void onFrameRendered(MediaCodec mediaCodec, long presentationTimeUs, long renderTimeNanos) {
++                    nxbFirstFrameShown();
++                    if (!USE_FRAME_RENDER_TIME) {
++                        try { mediaCodec.setOnFrameRenderedListener(null, null); }
++                        catch (IllegalStateException ignored) { /* Decoder was stopped concurrently. */ }
++                    }
+                     long delta = (renderTimeNanos / 1000000L) - (presentationTimeUs / 1000);
+                     if (delta >= 0 && delta < 1000) {
+                         if (USE_FRAME_RENDER_TIME) {
+@@ -967,6 +987,7 @@
+             if (nextOutputBuffer != null) {
+                 try {
+                     videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
++                    nxbFrameSubmitted();
+ 
+                     lastRenderedFrameTimeNanos = frameTimeNanos;
+                     activeWindowVideoStats.totalFramesRendered++;
+@@ -1051,6 +1072,7 @@
+                                     videoDecoder.releaseOutputBuffer(lastIndex, System.nanoTime());
+                                 }
+ 
++                                nxbFrameSubmitted();
+                                 activeWindowVideoStats.totalFramesRendered++;
+                             }
+                             else {
+diff --git a/app/src/main/java/com/limelight/binding/video/StartupFrameDetector.java b/app/src/main/java/com/limelight/binding/video/StartupFrameDetector.java
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/video/StartupFrameDetector.java
+@@ -0,0 +1,15 @@
++package com.limelight.binding.video;
++
++/** Only used during startup; intentionally black scenes are revealed after a bounded wait. */
++public final class StartupFrameDetector {
++    private StartupFrameDetector() {}
++    public static boolean hasVisibleContent(int[] pixels) {
++        if (pixels == null || pixels.length == 0) return false;
++        int bright = 0;
++        for (int pixel : pixels) {
++            int sum = ((pixel >> 16) & 255) + ((pixel >> 8) & 255) + (pixel & 255);
++            if (sum > 45) bright++;
++        }
++        return bright * 100 >= pixels.length;
++    }
++}
+diff --git a/app/src/main/res/layout/activity_game.xml b/app/src/main/res/layout/activity_game.xml
+--- a/app/src/main/res/layout/activity_game.xml
++++ b/app/src/main/res/layout/activity_game.xml
+@@ -50,4 +50,35 @@
+         android:preferKeepClear="true"
+         android:visibility="gone" />
+ 
++    <FrameLayout
++        android:id="@+id/nxbLoading"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:background="@drawable/nxb_loading_background"
++        android:clickable="true"
++        android:focusable="true">
++        <LinearLayout
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_gravity="center"
++            android:gravity="center"
++            android:orientation="vertical"
++            android:padding="28dp">
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
++                android:text="NXBRIDGE" android:textColor="#A7DFB7" android:textSize="13sp"
++                android:letterSpacing="0.16" android:textStyle="bold" />
++            <ProgressBar android:layout_width="44dp" android:layout_height="44dp"
++                android:layout_marginTop="28dp" android:indeterminateTint="#A7DFB7" />
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
++                android:layout_marginTop="24dp" android:text="@string/nxb_loading_title"
++                android:textColor="#F4FAF5" android:textSize="24sp" android:textStyle="bold" />
++            <TextView android:id="@+id/nxbLoadingMessage" android:layout_width="wrap_content"
++                android:layout_height="wrap_content" android:layout_marginTop="10dp"
++                android:text="@string/nxb_loading_connecting" android:textColor="#A7BBAE" android:textSize="15sp" />
++            <Button android:id="@+id/nxbLoadingCancel" android:layout_width="wrap_content"
++                android:layout_height="48dp" android:layout_marginTop="28dp"
++                android:text="@string/nxb_loading_cancel" android:textColor="#F4FAF5"
++                android:backgroundTint="#355546" />
++        </LinearLayout>
++    </FrameLayout>
+ </merge>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -305,4 +305,8 @@
+     <string name="analogscroll_left">Left analog stick</string>
+     <string name="title_floating_sticks">Floating thumbsticks</string>
+     <string name="summary_floating_sticks">Hide sticks until touched; adjust the touch regions in the on-screen layout editor.</string>
++    <string name="nxb_loading_title">Starting game</string>
++    <string name="nxb_loading_connecting">Connecting to your host…</string>
++    <string name="nxb_loading_waiting">Waiting for the game picture…</string>
++    <string name="nxb_loading_cancel">Cancel</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -286,4 +286,8 @@
+     <string name="analogscroll_none">默认 (两个摇杆都控制鼠标)</string>
+     <string name="title_floating_sticks">浮动摇杆</string>
+     <string name="summary_floating_sticks">默认隐藏；触摸时从手指落点出现，可在游戏内布局编辑中调整操作区域。</string>
+-</resources>
+\ No newline at end of file
++    <string name="nxb_loading_title">正在启动游戏</string>
++    <string name="nxb_loading_connecting">正在连接主机，请稍候…</string>
++    <string name="nxb_loading_waiting">正在等待游戏画面…</string>
++    <string name="nxb_loading_cancel">退出</string>
++</resources>
+diff --git a/app/src/main/res/drawable/nxb_loading_background.xml b/app/src/main/res/drawable/nxb_loading_background.xml
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/res/drawable/nxb_loading_background.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android">
++    <gradient android:angle="270" android:startColor="#182D24" android:endColor="#0D1714" />
++</shape>

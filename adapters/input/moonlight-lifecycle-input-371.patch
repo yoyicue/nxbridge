@@ -1,0 +1,76 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 370
++        versionCode = 371
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -1152,7 +1152,16 @@
+     }
+ 
+     @Override
++    protected void onResume() {
++        super.onResume();
++        if (controllerHandler != null) controllerHandler.setLifecycleInputSuppressed(false);
++    }
++
++    @Override
+     protected void onPause() {
++        if (controllerHandler != null) controllerHandler.setLifecycleInputSuppressed(true);
++        nxbLayoutEditStarting();
++        if (virtualController != null) virtualController.cancelForPhysicalTakeover();
+         if (isFinishing()) {
+             // Stop any further input device notifications before we lose focus (and pointer capture)
+             if (controllerHandler != null) {
+--- a/app/src/main/java/com/limelight/InputLabActivity.java
++++ b/app/src/main/java/com/limelight/InputLabActivity.java
+@@ -172,9 +172,9 @@
+         if (input != null && (event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK && input.handleMotionEvent(event)) return true;
+         return super.onGenericMotionEvent(event);
+     }
+-    @Override protected void onResume() { super.onResume(); if (input != null) input.setLayoutInputSuppressed(controller != null && controller.isEditing()); }
++    @Override protected void onResume() { super.onResume(); if (input != null) input.setLifecycleInputSuppressed(false); }
+     @Override protected void onPause() {
+-        if (input != null) input.setLayoutInputSuppressed(true);
++        if (input != null) input.setLifecycleInputSuppressed(true);
+         if (controller != null) controller.cancelForPhysicalTakeover();
+         super.onPause();
+     }
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -1214,6 +1214,7 @@
+     }
+ 
+     private volatile boolean nxbInputSuppressed;
++    private boolean nxbLayoutSuppressed, nxbLifecycleSuppressed;
+     private volatile boolean nxbAwaitingNeutral;
+ 
+     private boolean nxbNeutral(GenericControllerContext c) {
+@@ -1257,8 +1258,20 @@
+         }
+     }
+ 
+-    /** Suppress all controller sources while editing and release their published state. */
++    /** Editing and lifecycle suppression are independent; neither can release the other. */
+     public synchronized void setLayoutInputSuppressed(boolean suppress) {
++        nxbLayoutSuppressed = suppress;
++        updateInputSuppression();
++    }
++
++    public synchronized void setLifecycleInputSuppressed(boolean suppress) {
++        nxbLifecycleSuppressed = suppress;
++        updateInputSuppression();
++    }
++
++    private void updateInputSuppression() {
++        boolean suppress = nxbLayoutSuppressed || nxbLifecycleSuppressed;
++        if (suppress == nxbInputSuppressed) return;
+         if (suppress) {
+             nxbInputSuppressed = true;
+             nxbAwaitingNeutral = true;

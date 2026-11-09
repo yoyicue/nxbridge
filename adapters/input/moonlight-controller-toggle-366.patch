@@ -1,0 +1,85 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 365
++        versionCode = 366
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
++++ b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+@@ -42,7 +42,7 @@
+     static final String AUDIO_CONFIG_PREF_STRING = "list_audio_config";
+     private static final String USB_DRIVER_PREF_SRING = "checkbox_usb_driver";
+     private static final String VIDEO_FORMAT_PREF_STRING = "video_format";
+-    private static final String ONSCREEN_CONTROLLER_PREF_STRING = "checkbox_show_onscreen_controls";
++    private static final String ONSCREEN_CONTROLLER_PREF_STRING = "nxb_show_onscreen_controls";
+     private static final String ONLY_L3_R3_PREF_STRING = "checkbox_only_show_L3R3";
+     private static final String SHOW_GUIDE_BUTTON_PREF_STRING = "checkbox_show_guide_button";
+     private static final String LEGACY_DISABLE_FRAME_DROP_PREF_STRING = "checkbox_disable_frame_drop";
+@@ -82,7 +82,7 @@
+     private static final boolean DEFAULT_USB_DRIVER = true;
+     private static final String DEFAULT_VIDEO_FORMAT = "auto";
+ 
+-    private static final boolean ONSCREEN_CONTROLLER_DEFAULT = false;
++    private static final boolean ONSCREEN_CONTROLLER_DEFAULT = true;
+     private static final boolean ONLY_L3_R3_DEFAULT = false;
+     private static final boolean SHOW_GUIDE_BUTTON_DEFAULT = true;
+     private static final boolean DEFAULT_ENABLE_HDR = false;
+@@ -578,7 +578,7 @@
+         config.smallIconMode = prefs.getBoolean(SMALL_ICONS_PREF_STRING, getDefaultSmallMode(context));
+         config.multiController = prefs.getBoolean(MULTI_CONTROLLER_PREF_STRING, DEFAULT_MULTI_CONTROLLER);
+         config.usbDriver = prefs.getBoolean(USB_DRIVER_PREF_SRING, DEFAULT_USB_DRIVER);
+-        config.onscreenController = true;
++        config.onscreenController = prefs.getBoolean(ONSCREEN_CONTROLLER_PREF_STRING, ONSCREEN_CONTROLLER_DEFAULT);
+         config.onlyL3R3 = prefs.getBoolean(ONLY_L3_R3_PREF_STRING, ONLY_L3_R3_DEFAULT);
+         config.showGuideButton = false;
+         config.enableHdr = prefs.getBoolean(ENABLE_HDR_PREF_STRING, DEFAULT_ENABLE_HDR) && !isShieldAtvFirmwareWithBrokenHdr();
+--- a/app/src/main/res/xml/preferences.xml
++++ b/app/src/main/res/xml/preferences.xml
+@@ -148,8 +148,8 @@
+     <PreferenceCategory android:title="@string/category_on_screen_controls_settings"
+         android:key="category_onscreen_controls">
+         <CheckBoxPreference
+-            android:defaultValue="false"
+-            android:key="checkbox_show_onscreen_controls"
++            android:defaultValue="true"
++            android:key="nxb_show_onscreen_controls"
+             android:summary="@string/summary_checkbox_show_onscreen_controls"
+             android:title="@string/title_checkbox_show_onscreen_controls" />
+         <CheckBoxPreference
+@@ -159,13 +159,13 @@
+             android:defaultValue="true" />
+         <CheckBoxPreference
+             android:key="checkbox_vibrate_osc"
+-            android:dependency="checkbox_show_onscreen_controls"
++            android:dependency="nxb_show_onscreen_controls"
+             android:title="@string/title_checkbox_vibrate_osc"
+             android:summary="@string/summary_checkbox_vibrate_osc"
+             android:defaultValue="true" />
+         <CheckBoxPreference
+             android:defaultValue="false"
+-            android:dependency="checkbox_show_onscreen_controls"
++            android:dependency="nxb_show_onscreen_controls"
+             android:key="checkbox_only_show_L3R3"
+             android:summary="@string/summary_only_l3r3"
+             android:title="@string/title_only_l3r3" />
+@@ -173,13 +173,13 @@
+             android:layout_width="wrap_content"
+             android:layout_height="wrap_content"
+             android:defaultValue="true"
+-            android:dependency="checkbox_show_onscreen_controls"
++            android:dependency="nxb_show_onscreen_controls"
+             android:key="checkbox_show_guide_button"
+             android:summary="@string/summary_show_guide_button"
+             android:title="@string/title_show_guide_button" />
+         <com.limelight.preferences.SeekBarPreference
+             android:key="seekbar_osc_opacity"
+-            android:dependency="checkbox_show_onscreen_controls"
++            android:dependency="nxb_show_onscreen_controls"
+             android:dialogMessage="@string/summary_osc_opacity"
+             seekbar:min="0"
+             seekbar:step="1"

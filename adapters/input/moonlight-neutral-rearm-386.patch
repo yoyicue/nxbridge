@@ -1,0 +1,24 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 384
++        versionCode = 386
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -1334,6 +1334,10 @@
+         if (nxbAwaitingNeutral) {
+             if (!nxbAllNeutral()) return;
+             nxbAwaitingNeutral = false;
++            // The neutral packet may return early below for an unassigned
++            // controller. Rearm source arbitration before that return so the
++            // next genuine physical press is not lost.
++            nxbSources.physicalUpdate(false, true);
+         }
+         // Moonlight's controller-arrival helper itself sends a neutral state.
+         // Do not announce a newly discovered physical device for axis noise

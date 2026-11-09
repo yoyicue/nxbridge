@@ -125,16 +125,32 @@ pub async fn run(
     epoch: Epoch,
     video: mpsc::Sender<EncodedFrame>,
     audio: mpsc::Sender<HostAudioChunk>,
-    input: mpsc::Receiver<Vec<u8>>,
+    input: moonshine_core::session::stream::control::host_input::InputReceiver,
+    selected: Option<&crate::catalog::Game>,
 ) -> io::Result<()> {
-    let worker = std::env::var_os("NXB_GAME_WORKER")
-        .ok_or_else(|| io::Error::other("NXB_GAME_WORKER missing"))?;
-    let host = std::env::var_os("NXB_GAME_HOST")
-        .ok_or_else(|| io::Error::other("NXB_GAME_HOST missing"))?;
-    let game =
-        std::env::var_os("NXB_GAME_DIR").ok_or_else(|| io::Error::other("NXB_GAME_DIR missing"))?;
-    let sandbox = std::env::var_os("NXB_GAME_SANDBOX")
-        .ok_or_else(|| io::Error::other("NXB_GAME_SANDBOX missing"))?;
+    let _save_lock = selected.map(crate::catalog::lock_save).transpose()?;
+    let legacy =
+        |key| std::env::var_os(key).ok_or_else(|| io::Error::other(format!("{key} missing")));
+    let worker = if let Some(g) = selected {
+        g.worker.clone().into_os_string()
+    } else {
+        legacy("NXB_GAME_WORKER")?
+    };
+    let host = if let Some(g) = selected {
+        g.host.clone().into_os_string()
+    } else {
+        legacy("NXB_GAME_HOST")?
+    };
+    let game = if let Some(g) = selected {
+        g.game_dir.clone().into_os_string()
+    } else {
+        legacy("NXB_GAME_DIR")?
+    };
+    let sandbox = if let Some(g) = selected {
+        g.sandbox.clone().into_os_string()
+    } else {
+        legacy("NXB_GAME_SANDBOX")?
+    };
     let port = std::env::var("NXB_GAME_INPUT_PORT")
         .unwrap_or_else(|_| "47999".into())
         .parse::<u16>()
@@ -162,6 +178,10 @@ pub async fn run(
         .map(|b| format!("{b:02x}"))
         .collect();
     let mut cmd = tokio::process::Command::new(worker);
+    if let Some(g) = selected {
+        // Do not inherit another game's save, cheats, shader or asset settings.
+        crate::catalog::apply_environment(&mut cmd, g, std::env::vars_os().map(|(key, _)| key));
+    }
     cmd.arg("/usr/bin/sandbox-exec")
         .arg("-f")
         .arg(sandbox)

@@ -1,0 +1,87 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 14264cb2..50af755d 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 350
++        versionCode = 351
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutGeometry.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutGeometry.java
+new file mode 100644
+index 00000000..381771d5
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutGeometry.java
+@@ -0,0 +1,11 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Geometry after projection to actual Android view pixels. */
++public final class LayoutGeometry {
++    private LayoutGeometry() { }
++
++    public static boolean overlaps(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
++        return (long) ax < (long) bx + bw && (long) ax + aw > bx &&
++                (long) ay < (long) by + bh && (long) ay + ah > by;
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+index f9236f2b..dcdb9f3b 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -75,21 +75,6 @@ final class LayoutProfileStore {
+         }
+         JSONObject doc = new JSONObject(); doc.put("schema", 1); doc.put("identity", identity); doc.put("controls", controls); doc.put("revision", 1); doc.put("haptic", hapticEnabled); doc.put("fade", idleFade); doc.put("contrast", highContrast);
+         validate(doc, elements);
+-        // Floating activation zones intentionally sit underneath buttons. Other
+-        // targets must not overlap each other or the permanent settings entry.
+-        for (int i = 0; i < controls.length(); i++) {
+-            JSONObject a = controls.getJSONObject(i); if (a.getString("id").endsWith("_float")) continue;
+-            double ax = a.getDouble("x") * width, ay = a.getDouble("y") * height;
+-            double aw = a.getDouble("w") * width, ah = a.getDouble("h") * height;
+-            double gear = height * 0.06;
+-            if (ax < 15 + gear && ax + aw > 15 && ay < 15 + gear && ay + ah > 15) throw new IOException("control overlaps settings");
+-            for (int j = i + 1; j < controls.length(); j++) {
+-                JSONObject b = controls.getJSONObject(j); if (b.getString("id").endsWith("_float")) continue;
+-                double bx = b.getDouble("x") * width, by = b.getDouble("y") * height;
+-                double bw = b.getDouble("w") * width, bh = b.getDouble("h") * height;
+-                if (ax < bx + bw - 0.01 && ax + aw > bx + 0.01 && ay < by + bh - 0.01 && ay + ah > by + 0.01) throw new IOException("overlapping controls");
+-            }
+-        }
+         return doc;
+     }
+ 
+@@ -128,8 +113,29 @@ final class LayoutProfileStore {
+             if (!element.isOptionalControl() && !found.containsKey(key(element))) throw new IOException("missing control");
+         }
+         for (String id : found.keySet()) if (!expected.contains(id)) throw new IOException("unexpected control");
++        // Check the projected pixel rectangles used by applyDocument, on every
++        // path (capture, load, history and save). Floating zones are allowed
++        // below buttons, but neither ordinary targets nor settings may overlap.
++        for (int i = 0; i < controls.length(); i++) {
++            JSONObject a = controls.getJSONObject(i); if (a.getString("id").endsWith("_float")) continue;
++            int ax = (int)Math.round(a.getDouble("x") * width), ay = (int)Math.round(a.getDouble("y") * height);
++            int aw = (int)Math.round(a.getDouble("w") * width), ah = (int)Math.round(a.getDouble("h") * height);
++            int gear = (int)(height * 0.06f);
++            if (LayoutGeometry.overlaps(ax, ay, aw, ah, 15, 15, gear, gear)) throw new IOException("control overlaps settings");
++            for (int j = i + 1; j < controls.length(); j++) {
++                JSONObject b = controls.getJSONObject(j); if (b.getString("id").endsWith("_float")) continue;
++                int bx = (int)Math.round(b.getDouble("x") * width), by = (int)Math.round(b.getDouble("y") * height);
++                int bw = (int)Math.round(b.getDouble("w") * width), bh = (int)Math.round(b.getDouble("h") * height);
++                if (LayoutGeometry.overlaps(ax, ay, aw, ah, bx, by, bw, bh)) throw new IOException("overlapping controls");
++            }
++        }
+         JSONObject left = found.get("12_float"), right = found.get("13_float");
+-        if (left != null && right != null && left.getDouble("x") + left.getDouble("w") > right.getDouble("x") && right.getDouble("x") + right.getDouble("w") > left.getDouble("x") && left.getDouble("y") + left.getDouble("h") > right.getDouble("y") && right.getDouble("y") + right.getDouble("h") > left.getDouble("y")) throw new IOException("overlapping stick areas");
++        if (left != null && right != null && LayoutGeometry.overlaps(
++                (int)Math.round(left.getDouble("x") * width), (int)Math.round(left.getDouble("y") * height),
++                (int)Math.round(left.getDouble("w") * width), (int)Math.round(left.getDouble("h") * height),
++                (int)Math.round(right.getDouble("x") * width), (int)Math.round(right.getDouble("y") * height),
++                (int)Math.round(right.getDouble("w") * width), (int)Math.round(right.getDouble("h") * height)))
++            throw new IOException("overlapping stick areas");
+         return found;
+     }
+ 

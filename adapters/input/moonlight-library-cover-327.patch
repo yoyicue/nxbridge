@@ -1,0 +1,232 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 325
++        versionCode = 327
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/nvstream/http/NvApp.java
++++ b/app/src/main/java/com/limelight/nvstream/http/NvApp.java
+@@ -7,6 +7,9 @@
+     private int appId;
+     private boolean initialized;
+     private boolean hdrSupported;
++    private volatile String coverVersion = "";
++    public String getCoverVersion() { return coverVersion; }
++    public void setCoverVersion(String version) { coverVersion = version != null && version.matches("[0-9a-f]{64}") ? version : ""; }
+     
+     public NvApp() {}
+     
+--- a/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
++++ b/app/src/main/java/com/limelight/nvstream/http/NvHTTP.java
+@@ -660,6 +660,8 @@
+                     app.setAppName(xpp.getText());
+                 } else if (currentTag.peek().equals("ID")) {
+                     app.setAppId(xpp.getText());
++                } else if (currentTag.peek().equals("NXBridgeCoverVersion")) {
++                    app.setCoverVersion(xpp.getText());
+                 } else if (currentTag.peek().equals("IsHdrSupported")) {
+                     app.setHdrSupported(xpp.getText().equals("1"));
+                 }
+--- a/app/src/main/java/com/limelight/AppView.java
++++ b/app/src/main/java/com/limelight/AppView.java
+@@ -551,6 +551,7 @@
+ 
+                 // First handle app updates and additions
+                 for (NvApp app : appList) {
++                    com.limelight.grid.assets.DiskAssetLoader.noteVersion(computer.uuid, app);
+                     boolean foundExistingApp = false;
+ 
+                     // Try to update an existing app in the list first
+@@ -563,6 +564,11 @@
+                                 updated = true;
+                             }
+ 
++                            if (!existingApp.app.getCoverVersion().equals(app.getCoverVersion())) {
++                                existingApp.app.setCoverVersion(app.getCoverVersion());
++                                appGridAdapter.invalidateArtCache();
++                                updated = true;
++                            }
+                             foundExistingApp = true;
+                             break;
+                         }
+--- a/app/src/main/java/com/limelight/grid/AppGridAdapter.java
++++ b/app/src/main/java/com/limelight/grid/AppGridAdapter.java
+@@ -115,6 +115,10 @@
+         setLayoutId(getLayoutIdForPreferences(prefs));
+     }
+ 
++    public void invalidateArtCache() {
++        loader.freeCacheMemory();
++    }
++
+     public void cancelQueuedOperations() {
+         loader.cancelForegroundLoads();
+         loader.cancelBackgroundLoads();
+--- a/app/src/main/java/com/limelight/grid/assets/MemoryAssetLoader.java
++++ b/app/src/main/java/com/limelight/grid/assets/MemoryAssetLoader.java
+@@ -29,7 +29,7 @@
+     private static final HashMap<String, SoftReference<ScaledBitmap>> evictionCache = new HashMap<>();
+ 
+     private static String constructKey(CachedAppAssetLoader.LoaderTuple tuple) {
+-        return tuple.computer.uuid+"-"+tuple.app.getAppId();
++        return tuple.computer.uuid+"-"+tuple.app.getAppId()+"-"+tuple.coverVersion;
+     }
+ 
+     public ScaledBitmap loadBitmapFromCache(CachedAppAssetLoader.LoaderTuple tuple) {
+--- a/app/src/main/java/com/limelight/grid/assets/DiskAssetLoader.java
++++ b/app/src/main/java/com/limelight/grid/assets/DiskAssetLoader.java
+@@ -14,6 +14,10 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.security.MessageDigest;
++import java.util.HashMap;
+ 
+ public class DiskAssetLoader {
+     // 5 MB
+@@ -30,6 +34,25 @@
+         this.cacheDir = context.getCacheDir();
+         this.isLowRamDevice =
+                 ((ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE)).isLowRamDevice();
++    }
++
++    private static final HashMap<String, String> latestVersions = new HashMap<>();
++    private static String key(String uuid, int id) { return uuid + "-" + id; }
++    public static synchronized void noteVersion(String uuid, com.limelight.nvstream.http.NvApp app) {
++        latestVersions.put(key(uuid, app.getAppId()), app.getCoverVersion());
++    }
++    public boolean matchesVersion(CachedAppAssetLoader.LoaderTuple tuple) {
++        if (tuple.coverVersion.isEmpty()) return checkCacheExists(tuple);
++        File file = getFile(tuple.computer.uuid, tuple.app.getAppId());
++        if (!file.isFile() || file.length() > MAX_ASSET_SIZE) return false;
++        try (InputStream in = new FileInputStream(file)) {
++            MessageDigest digest = MessageDigest.getInstance("SHA-256");
++            byte[] b = new byte[8192]; int n;
++            while ((n = in.read(b)) != -1) digest.update(b, 0, n);
++            StringBuilder hex = new StringBuilder();
++            for (byte v : digest.digest()) hex.append(String.format(java.util.Locale.ROOT, "%02x", v & 255));
++            return tuple.coverVersion.equals(hex.toString());
++        } catch (Exception e) { return false; }
+     }
+ 
+     public boolean checkCacheExists(CachedAppAssetLoader.LoaderTuple tuple) {
+@@ -153,19 +176,36 @@
+     }
+ 
+     public void populateCacheWithStream(CachedAppAssetLoader.LoaderTuple tuple, InputStream input) {
+-        boolean success = false;
+-        try (final OutputStream out = CacheHelper.openCacheFileForOutput(
+-                cacheDir, "boxart", tuple.computer.uuid, tuple.app.getAppId() + ".png")
+-        ) {
+-            CacheHelper.writeInputStreamToOutputStream(input, out, MAX_ASSET_SIZE);
+-            success = true;
+-        } catch (IOException e) {
+-            e.printStackTrace();
++        File target = CacheHelper.openPath(true, cacheDir, "boxart", tuple.computer.uuid, tuple.app.getAppId() + ".png");
++        File temp = null;
++        try {
++            temp = File.createTempFile("nxb-cover-", ".tmp", target.getParentFile());
++            try (OutputStream out = new FileOutputStream(temp)) {
++                CacheHelper.writeInputStreamToOutputStream(input, out, MAX_ASSET_SIZE);
++            }
++            BitmapFactory.Options options = new BitmapFactory.Options();
++            options.inJustDecodeBounds = true;
++            BitmapFactory.decodeFile(temp.getAbsolutePath(), options);
++            if (options.outWidth <= 0 || options.outHeight <= 0) return;
++            if (!tuple.coverVersion.isEmpty()) {
++                MessageDigest digest = MessageDigest.getInstance("SHA-256");
++                try (InputStream in = new FileInputStream(temp)) {
++                    byte[] b = new byte[8192]; int n;
++                    while ((n = in.read(b)) != -1) digest.update(b, 0, n);
++                }
++                StringBuilder hex = new StringBuilder();
++                for (byte v : digest.digest()) hex.append(String.format(java.util.Locale.ROOT, "%02x", v & 255));
++                if (!tuple.coverVersion.equals(hex.toString())) return;
++            }
++            synchronized (DiskAssetLoader.class) {
++                String latest = latestVersions.get(key(tuple.computer.uuid, tuple.app.getAppId()));
++                if (latest != null && !latest.equals(tuple.coverVersion)) return;
++                if (!temp.renameTo(target)) LimeLog.warning("Unable to replace cover for " + tuple);
++            }
++        } catch (Exception e) {
++            LimeLog.warning("Unable to populate cache with tuple: " + tuple);
+         } finally {
+-            if (!success) {
+-                LimeLog.warning("Unable to populate cache with tuple: "+tuple);
+-                CacheHelper.deleteCacheFile(cacheDir, "boxart", tuple.computer.uuid, tuple.app.getAppId() + ".png");
+-            }
++            if (temp != null) temp.delete();
+         }
+     }
+ }
+--- a/app/src/main/java/com/limelight/grid/assets/CachedAppAssetLoader.java
++++ b/app/src/main/java/com/limelight/grid/assets/CachedAppAssetLoader.java
+@@ -113,7 +113,7 @@
+                 // If there's a task associated with this load, we should return the bitmap
+                 if (task != null) {
+                     // If the cached bitmap is valid, return it. Otherwise, we'll try the load again
+-                    ScaledBitmap bmp = diskLoader.loadBitmapFromCache(tuple, (int) scalingDivider);
++                    ScaledBitmap bmp = diskLoader.matchesVersion(tuple) ? diskLoader.loadBitmapFromCache(tuple, (int) scalingDivider) : null;
+                     if (bmp != null) {
+                         return bmp;
+                     }
+@@ -164,11 +164,12 @@
+                 return null;
+             }
+ 
+-            ScaledBitmap bmp = diskLoader.loadBitmapFromCache(tuple, (int) scalingDivider);
++            ScaledBitmap bmp = diskLoader.matchesVersion(tuple) ? diskLoader.loadBitmapFromCache(tuple, (int) scalingDivider) : null;
+             if (bmp == null) {
+                 if (!diskOnly) {
+                     // Try to load the asset from the network
+                     bmp = doNetworkAssetLoad(tuple, this);
++                    if (bmp == null) bmp = diskLoader.loadBitmapFromCache(tuple, (int) scalingDivider);
+                 } else {
+                     // Report progress to display the placeholder and spin
+                     // off the network-capable task
+@@ -177,7 +178,7 @@
+             }
+ 
+             // Cache the bitmap
+-            if (bmp != null) {
++            if (bmp != null && diskLoader.matchesVersion(tuple)) {
+                 memoryLoader.populateCache(tuple, bmp);
+             }
+ 
+@@ -305,6 +306,7 @@
+     public void queueCacheLoad(NvApp app) {
+         final LoaderTuple tuple = new LoaderTuple(computer, app);
+ 
++        if (!tuple.coverVersion.isEmpty()) return; // visible cards refresh via the foreground loader
+         if (memoryLoader.loadBitmapFromCache(tuple) != null) {
+             // It's in memory which means it must also be on disk
+             return;
+@@ -372,10 +374,12 @@
+     public static class LoaderTuple {
+         public final ComputerDetails computer;
+         public final NvApp app;
++        public final String coverVersion;
+ 
+         public LoaderTuple(ComputerDetails computer, NvApp app) {
+             this.computer = computer;
+             this.app = app;
++            this.coverVersion = app.getCoverVersion();
+         }
+ 
+         @Override
+@@ -385,7 +389,7 @@
+             }
+ 
+             LoaderTuple other = (LoaderTuple) o;
+-            return computer.uuid.equals(other.computer.uuid) && app.getAppId() == other.app.getAppId();
++            return computer.uuid.equals(other.computer.uuid) && app.getAppId() == other.app.getAppId() && coverVersion.equals(other.coverVersion);
+         }
+ 
+         @Override

@@ -1,0 +1,166 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index c9cc3e47..82351ebb 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,18 +1,19 @@
+ apply plugin: 'com.android.application'
+ 
+ android {
+-    ndkVersion "29.0.14206865"
++    ndkVersion "28.2.13676358"
+ 
+     compileSdk 37
+ 
+     namespace 'com.limelight'
+ 
+     defaultConfig {
++        ndk { abiFilters "arm64-v8a" }
+         minSdk 21
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 315
++        versionCode = 318
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+@@ -84,7 +85,7 @@ android {
+     buildTypes {
+         debug {
+             applicationIdSuffix ".debug"
+-            resValue "string", "app_label", "Moonlight (Debug)"
++            resValue "string", "app_label", "NXBridge Pad"
+             resValue "string", "app_label_root", "Moonlight (Root Debug)"
+         }
+         release {
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+index d66ca836..564b5f1d 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+@@ -213,8 +213,8 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_A,
+-                    !config.flipFaceButtons ? ControllerPacket.A_FLAG : ControllerPacket.B_FLAG, 0, 1,
+-                    !config.flipFaceButtons ? "A" : "B", -1, controller, context),
++                    !true ? ControllerPacket.A_FLAG : ControllerPacket.B_FLAG, 0, 1,
++                    !true ? "A" : "B", -1, controller, context),
+                     screenScale(BUTTON_BASE_X, height) + rightDisplacement,
+                     screenScale(BUTTON_BASE_Y + 2 * BUTTON_SIZE, height),
+                     screenScale(BUTTON_SIZE, height),
+@@ -223,8 +223,8 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_B,
+-                    config.flipFaceButtons ? ControllerPacket.A_FLAG : ControllerPacket.B_FLAG, 0, 1,
+-                    config.flipFaceButtons ? "A" : "B", -1, controller, context),
++                    true ? ControllerPacket.A_FLAG : ControllerPacket.B_FLAG, 0, 1,
++                    true ? "A" : "B", -1, controller, context),
+                     screenScale(BUTTON_BASE_X + BUTTON_SIZE, height) + rightDisplacement,
+                     screenScale(BUTTON_BASE_Y + BUTTON_SIZE, height),
+                     screenScale(BUTTON_SIZE, height),
+@@ -233,8 +233,8 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_X,
+-                    !config.flipFaceButtons ? ControllerPacket.X_FLAG : ControllerPacket.Y_FLAG, 0, 1,
+-                    !config.flipFaceButtons ? "X" : "Y", -1, controller, context),
++                    !true ? ControllerPacket.X_FLAG : ControllerPacket.Y_FLAG, 0, 1,
++                    !true ? "X" : "Y", -1, controller, context),
+                     screenScale(BUTTON_BASE_X - BUTTON_SIZE, height) + rightDisplacement,
+                     screenScale(BUTTON_BASE_Y + BUTTON_SIZE, height),
+                     screenScale(BUTTON_SIZE, height),
+@@ -243,8 +243,8 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_Y,
+-                    config.flipFaceButtons ? ControllerPacket.X_FLAG : ControllerPacket.Y_FLAG, 0, 1,
+-                    config.flipFaceButtons ? "X" : "Y", -1, controller, context),
++                    true ? ControllerPacket.X_FLAG : ControllerPacket.Y_FLAG, 0, 1,
++                    true ? "X" : "Y", -1, controller, context),
+                     screenScale(BUTTON_BASE_X, height) + rightDisplacement,
+                     screenScale(BUTTON_BASE_Y, height),
+                     screenScale(BUTTON_SIZE, height),
+@@ -252,7 +252,7 @@ public class VirtualControllerConfigurationLoader {
+             );
+ 
+             controller.addElement(createLeftTrigger(
+-                    1, "LT", -1, controller, context),
++                    1, "ZL", -1, controller, context),
+                     screenScale(TRIGGER_L_BASE_X, height),
+                     screenScale(TRIGGER_BASE_Y, height),
+                     screenScale(TRIGGER_WIDTH, height),
+@@ -260,7 +260,7 @@ public class VirtualControllerConfigurationLoader {
+             );
+ 
+             controller.addElement(createRightTrigger(
+-                    1, "RT", -1, controller, context),
++                    1, "ZR", -1, controller, context),
+                     screenScale(TRIGGER_R_BASE_X + TRIGGER_DISTANCE, height) + rightDisplacement,
+                     screenScale(TRIGGER_BASE_Y, height),
+                     screenScale(TRIGGER_WIDTH, height),
+@@ -269,7 +269,7 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_LB,
+-                    ControllerPacket.LB_FLAG, 0, 1, "LB", -1, controller, context),
++                    ControllerPacket.LB_FLAG, 0, 1, "L", -1, controller, context),
+                     screenScale(TRIGGER_L_BASE_X + TRIGGER_DISTANCE, height),
+                     screenScale(TRIGGER_BASE_Y, height),
+                     screenScale(TRIGGER_WIDTH, height),
+@@ -278,7 +278,7 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_RB,
+-                    ControllerPacket.RB_FLAG, 0, 1, "RB", -1, controller, context),
++                    ControllerPacket.RB_FLAG, 0, 1, "R", -1, controller, context),
+                     screenScale(TRIGGER_R_BASE_X, height) + rightDisplacement,
+                     screenScale(TRIGGER_BASE_Y, height),
+                     screenScale(TRIGGER_WIDTH, height),
+@@ -301,7 +301,7 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_BACK,
+-                    ControllerPacket.BACK_FLAG, 0, 2, "BACK", -1, controller, context),
++                    ControllerPacket.BACK_FLAG, 0, 2, "−", -1, controller, context),
+                     screenScale(BACK_X, height),
+                     screenScale(START_BACK_Y, height),
+                     screenScale(START_BACK_WIDTH, height),
+@@ -310,7 +310,7 @@ public class VirtualControllerConfigurationLoader {
+ 
+             controller.addElement(createDigitalButton(
+                     VirtualControllerElement.EID_START,
+-                    ControllerPacket.PLAY_FLAG, 0, 3, "START", -1, controller, context),
++                    ControllerPacket.PLAY_FLAG, 0, 3, "+", -1, controller, context),
+                     screenScale(START_X, height) + rightDisplacement,
+                     screenScale(START_BACK_Y, height),
+                     screenScale(START_BACK_WIDTH, height),
+diff --git a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+index 8ed01e36..afd441b3 100644
+--- a/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
++++ b/app/src/main/java/com/limelight/preferences/PreferenceConfiguration.java
+@@ -578,9 +578,9 @@ public class PreferenceConfiguration {
+         config.smallIconMode = prefs.getBoolean(SMALL_ICONS_PREF_STRING, getDefaultSmallMode(context));
+         config.multiController = prefs.getBoolean(MULTI_CONTROLLER_PREF_STRING, DEFAULT_MULTI_CONTROLLER);
+         config.usbDriver = prefs.getBoolean(USB_DRIVER_PREF_SRING, DEFAULT_USB_DRIVER);
+-        config.onscreenController = prefs.getBoolean(ONSCREEN_CONTROLLER_PREF_STRING, ONSCREEN_CONTROLLER_DEFAULT);
++        config.onscreenController = true;
+         config.onlyL3R3 = prefs.getBoolean(ONLY_L3_R3_PREF_STRING, ONLY_L3_R3_DEFAULT);
+-        config.showGuideButton = prefs.getBoolean(SHOW_GUIDE_BUTTON_PREF_STRING, SHOW_GUIDE_BUTTON_DEFAULT);
++        config.showGuideButton = false;
+         config.enableHdr = prefs.getBoolean(ENABLE_HDR_PREF_STRING, DEFAULT_ENABLE_HDR) && !isShieldAtvFirmwareWithBrokenHdr();
+         config.enablePip = prefs.getBoolean(ENABLE_PIP_PREF_STRING, DEFAULT_ENABLE_PIP);
+         config.enablePerfOverlay = prefs.getBoolean(ENABLE_PERF_OVERLAY_STRING, DEFAULT_ENABLE_PERF_OVERLAY);
+diff --git a/build.gradle b/build.gradle
+index bf469e18..487d37d1 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -5,7 +5,7 @@ buildscript {
+         google()
+     }
+     dependencies {
+-        classpath 'com.android.tools.build:gradle:9.4.0'
++        classpath 'com.android.tools.build:gradle:9.1.1'
+     }
+ }
+ 

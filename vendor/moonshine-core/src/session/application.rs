@@ -14,6 +14,10 @@ pub struct ApplicationConfig {
 	/// Title of the application.
 	pub title: String,
 
+	/// Stable NXBridge library identity, independent of the GameStream title hash.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub library_game_id: Option<String>,
+
 	/// Path to a boxart image.
 	pub boxart: Option<PathBuf>,
 
@@ -45,6 +49,7 @@ impl Default for ApplicationConfig {
 	fn default() -> Self {
 		Self {
 			title: String::new(),
+			library_game_id: None,
 			boxart: None,
 			command: Vec::new(),
 			pre_command: Vec::new(),

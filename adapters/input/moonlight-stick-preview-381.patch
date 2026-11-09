@@ -1,0 +1,23 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 380
++        versionCode = 381
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
+@@ -326,6 +326,9 @@
+             paint.setTextAlign(Paint.Align.CENTER);
+             float sampleX = getWidth()/2f, sampleY = getHeight()/2f;
+             float visualRadius = floatingRadius * visualScale;
++            // Keep the right-stick example below the face buttons where space allows.
++            if (elementId == EID_RS) sampleY = Math.max(sampleY,
++                    getHeight() - visualRadius - 8 * getResources().getDisplayMetrics().density);
+             canvas.drawText(getContext().getString(elementId == EID_LS ? R.string.nxb_stick_left_example : R.string.nxb_stick_right_example),
+                     sampleX, Math.max(paint.getTextSize(), sampleY - visualRadius - paint.getTextSize() * 0.5f), paint);
+             paint.setStyle(Paint.Style.STROKE);

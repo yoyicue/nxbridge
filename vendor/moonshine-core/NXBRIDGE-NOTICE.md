@@ -23,6 +23,10 @@ network-lookup tracing was removed. See `docs/reports/NXB-032.md` for evidence.
 The video packetizer now uses the Moonlight nanors Cauchy parity matrix and
 sets parity count using the receiver's rounding rule. The GameStream session
 input, recovery, audio and video hooks are local experimental adaptations.
+The app list includes an optional NXBridge SHA-256 cover-version extension;
+the standard app asset endpoint continues serving the configured PNG bytes.
+An optional library-game identity extension associates client layouts with a
+stable catalog ID without changing the GameStream application ID. The input handoff now tags bounded-queue events with an epoch, signals overflow and control-peer disconnects, and uses authenticated control activity for an experimental input-silence watchdog. These changes are not an upstream compatibility or latency guarantee.
 
 Audio integration carries source monotonic timestamps, session identity and
 discontinuity flags, and bounds gap concealment to four 5 ms silent blocks when
@@ -43,3 +47,5 @@ a Vandermonde matrix that would immediately be replaced. Session keys and
 counters remain private. Video has one queued encoded frame and one locally
 acknowledged packet batch; encoded reference frames are never discarded to
 catch up. Both Cargo entry points select the same patched fec-rs package.
+
+The diagnostic `tests/fixtures/input-stage-instrumentation.patch` includes this modified protocol core and follows the same combined license obligations; it is not part of the production runtime.

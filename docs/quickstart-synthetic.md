@@ -59,4 +59,4 @@ env -u NXB_GAME_WORKER cargo run --locked -p nxbridge-gamestream -- \
 - 原生编译报缺少 CMake、Apple SDK 或 Opus：检查工具是否在 PATH 中，运行 `pkg-config --modversion opus` 并检查 Xcode 工具链。
 - 自检报找不到 FFmpeg、ffprobe 或 FFV1：检查 `ffmpeg -encoders` 和 PATH；FFV1 仅用于本地自检，并非产品串流编码。
 - 本地自检不证明网络、游戏、输入、同步、性能及断线恢复。音频桥现已携带源时间戳和间断信息，并通过有界补偿和积压回归；实际 Pad 声音与音画同步仍需复测，见 [NXB-107](reports/NXB-107.md)。
-- 游戏实验仍依赖本机忽略目录中的引擎修订、构建补丁及资源；Android 实验客户端构建也尚未形成从公开材料完成的链路。后续工作见 [任务清单](../tasks/backlog.json)。
+- 游戏实验仍依赖本机忽略目录中的引擎修订、构建补丁及资源；Android 实验客户端可按 [实验客户端源码构建](moonlight-experimental-build.md) 重放并在本机编译，干净机器构建和二进制复现仍未验证。后续工作见 [任务清单](../tasks/backlog.json)。

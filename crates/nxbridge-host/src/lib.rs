@@ -159,9 +159,17 @@ pub fn snapshot(endpoints: &[Endpoint]) -> String {
 }
 
 fn response(stream: &mut TcpStream, code: &str, content_type: &str, body: &str) -> io::Result<()> {
+    response_bytes(stream, code, content_type, body.as_bytes())
+}
+fn response_bytes(
+    stream: &mut TcpStream,
+    code: &str,
+    content_type: &str,
+    body: &[u8],
+) -> io::Result<()> {
     let header = format!("HTTP/1.1 {code}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'\r\n\r\n", body.len());
     stream.write_all(header.as_bytes())?;
-    stream.write_all(body.as_bytes())
+    stream.write_all(body)
 }
 
 fn handle(
@@ -195,7 +203,8 @@ fn handle(
             );
         }
     }
-    let Ok(text) = std::str::from_utf8(&request) else {
+    let header_end = request.windows(4).position(|v| v == b"\r\n\r\n").unwrap() + 4;
+    let Ok(text) = std::str::from_utf8(&request[..header_end]) else {
         return response(
             &mut stream,
             "400 Bad Request",
@@ -240,8 +249,8 @@ fn handle(
             "Local host required",
         );
     }
-    if method == "POST" && path == "/api/v1/games" {
-        let header_end = request.windows(4).position(|v| v == b"\r\n\r\n").unwrap() + 4;
+    if method == "POST" && (path == "/api/v1/games" || path.starts_with("/api/v1/covers/")) {
+        let cover_id = path.strip_prefix("/api/v1/covers/").map(str::to_owned);
         let headers = text
             .split("\r\n")
             .skip(1)
@@ -273,7 +282,12 @@ fn handle(
             );
         }
         if content_types.len() != 1
-            || content_types[0] != "application/toml"
+            || content_types[0]
+                != if cover_id.is_some() {
+                    "image/png"
+                } else {
+                    "application/toml"
+                }
             || lengths.len() != 1
             || !get("transfer-encoding").is_empty()
         {
@@ -292,7 +306,12 @@ fn handle(
                 "{\"error\":\"invalid_request\"}",
             );
         };
-        if length == 0 || length > 8192 || request.len() > header_end + length {
+        let max_body = if cover_id.is_some() {
+            5 * 1024 * 1024 - 1
+        } else {
+            8192
+        };
+        if length == 0 || length > max_body || request.len() > header_end + length {
             return response(
                 &mut stream,
                 "400 Bad Request",
@@ -300,6 +319,20 @@ fn handle(
                 "{\"error\":\"invalid_request\"}",
             );
         }
+        let cover_version = if cover_id.is_some() {
+            let versions = get("x-nxbridge-cover-version");
+            if versions.len() != 1 {
+                return response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "text/plain",
+                    "Cover version required",
+                );
+            }
+            Some(versions[0].to_owned())
+        } else {
+            None
+        };
         while request.len() < header_end + length {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -319,6 +352,41 @@ fn handle(
                     "{\"error\":\"invalid_request\"}",
                 );
             }
+        }
+        if let Some(id) = cover_id {
+            return match catalog.set_cover(
+                &id,
+                cover_version.as_deref().unwrap_or(""),
+                &request[header_end..],
+            ) {
+                Ok(version) => response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &format!("{{\"cover_version\":\"{version}\"}}"),
+                ),
+                Err(StoreError::Invalid) => response(
+                    &mut stream,
+                    "422 Unprocessable Entity",
+                    "text/plain",
+                    "Invalid cover",
+                ),
+                Err(StoreError::Conflict) => response(
+                    &mut stream,
+                    "409 Conflict",
+                    "text/plain",
+                    "Cover changed; reload",
+                ),
+                Err(StoreError::ReadOnly) => {
+                    response(&mut stream, "403 Forbidden", "text/plain", "Read only")
+                }
+                Err(StoreError::Io) => response(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    "text/plain",
+                    "Cover unavailable",
+                ),
+            };
         }
         let body = match std::str::from_utf8(&request[header_end..]) {
             Ok(v) => v,
@@ -371,6 +439,17 @@ fn handle(
             "text/plain; charset=utf-8",
             "Read only",
         );
+    }
+    if let Some(id) = path.strip_prefix("/api/v1/covers/") {
+        return match catalog.cover(id) {
+            Ok(bytes) => response_bytes(&mut stream, "200 OK", "image/png", &bytes),
+            Err(_) => response(
+                &mut stream,
+                "404 Not Found",
+                "text/plain",
+                "Cover unavailable",
+            ),
+        };
     }
     match path {
         "/" => response(&mut stream, "200 OK", "text/html; charset=utf-8", PAGE),

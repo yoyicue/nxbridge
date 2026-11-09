@@ -1,0 +1,395 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 50af755d..2ca9abe2 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 351
++        versionCode = 353
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+index dcdb9f3b..6a03c5c6 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -60,9 +60,12 @@ final class LayoutProfileStore {
+             if (element.isOptionalControl() && !element.isControlEnabled()) continue;
+             FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) element.getLayoutParams();
+             boolean zone = key.endsWith("_float");
+-            if (p.leftMargin < 0 || p.topMargin < 0 || p.width <= 0 || p.height <= 0 ||
++            if (!element.virtualController.safeArea().contains(p.leftMargin, p.topMargin, p.width, p.height) || p.leftMargin < 0 || p.topMargin < 0 || p.width <= 0 || p.height <= 0 ||
+                 p.leftMargin + (long)p.width > width || p.topMargin + (long)p.height > height ||
+                 (!zone && (p.width < minTarget || p.height < minTarget))) throw new IOException("control outside safe area or too small");
++            LayoutSafeArea safe = element.virtualController.safeArea();
++            int gear = (int)(height * 0.06f);
++            if (!zone && LayoutGeometry.overlaps(p.leftMargin, p.topMargin, p.width, p.height, safe.left + 15, safe.top + 15, gear, gear)) throw new IOException("control overlaps settings");
+             JSONObject item = new JSONObject();
+             item.put("id", key); item.put("x", p.leftMargin / (double)width); item.put("y", p.topMargin / (double)height);
+             item.put("w", p.width / (double)width); item.put("h", p.height / (double)height);
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutSafeArea.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutSafeArea.java
+new file mode 100644
+index 00000000..a203faf0
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutSafeArea.java
+@@ -0,0 +1,53 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Coordinates local to the controller container, intersected with window insets. */
++public final class LayoutSafeArea {
++    public final int left, top, right, bottom;
++
++    private LayoutSafeArea(int left, int top, int right, int bottom) {
++        this.left = left; this.top = top; this.right = right; this.bottom = bottom;
++    }
++
++    public static LayoutSafeArea fromWindow(int width, int height, int rootWidth, int rootHeight,
++            int offsetX, int offsetY, int insetLeft, int insetTop, int insetRight, int insetBottom) {
++        if (width <= 0 || height <= 0 || rootWidth <= 0 || rootHeight <= 0 ||
++                insetLeft < 0 || insetTop < 0 || insetRight < 0 || insetBottom < 0)
++            throw new IllegalArgumentException("invalid window geometry");
++        long left = Math.max(0L, (long) insetLeft - offsetX);
++        long top = Math.max(0L, (long) insetTop - offsetY);
++        long right = Math.min((long) width, (long) rootWidth - insetRight - offsetX);
++        long bottom = Math.min((long) height, (long) rootHeight - insetBottom - offsetY);
++        if (left >= right || top >= bottom) throw new IllegalArgumentException("no safe area");
++        return new LayoutSafeArea((int) left, (int) top, (int) right, (int) bottom);
++    }
++
++    public boolean contains(int x, int y, int width, int height) {
++        return width > 0 && height > 0 && x >= left && y >= top &&
++                (long) x + width <= right && (long) y + height <= bottom;
++    }
++
++    /** Intersect with the parent-clipped visible part of the controller container. */
++    public LayoutSafeArea intersect(int clipLeft, int clipTop, int clipRight, int clipBottom) {
++        int l = Math.max(left, clipLeft), t = Math.max(top, clipTop);
++        int r = Math.min(right, clipRight), b = Math.min(bottom, clipBottom);
++        if (l >= r || t >= b) throw new IllegalArgumentException("no visible safe area");
++        return new LayoutSafeArea(l, t, r, b);
++    }
++
++    /** Preserve target size where possible; shrink only if the available area is smaller. */
++    public int[] constrain(int x, int y, int width, int height) {
++        if (width <= 0 || height <= 0) throw new IllegalArgumentException("invalid target");
++        int w = Math.min(width, right - left), h = Math.min(height, bottom - top);
++        int l = (int)Math.max(left, Math.min((long)x, (long)right - w));
++        int t = (int)Math.max(top, Math.min((long)y, (long)bottom - h));
++        return new int[]{l, t, w, h};
++    }
++
++    @Override public boolean equals(Object value) {
++        if (!(value instanceof LayoutSafeArea)) return false;
++        LayoutSafeArea other = (LayoutSafeArea)value;
++        return left == other.left && top == other.top && right == other.right && bottom == other.bottom;
++    }
++
++    @Override public int hashCode() { return (((left * 31) + top) * 31 + right) * 31 + bottom; }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+index 90ba886c..a471af88 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -15,6 +15,12 @@ import android.util.DisplayMetrics;
+ import android.view.View;
+ import android.view.MotionEvent;
+ import android.os.SystemClock;
++import android.os.Build;
++import android.graphics.Insets;
++import android.graphics.Rect;
++import android.graphics.drawable.GradientDrawable;
++import android.view.DisplayCutout;
++import android.view.WindowInsets;
+ import android.widget.Button;
+ import android.widget.FrameLayout;
+ import android.widget.Toast;
+@@ -88,6 +94,10 @@ public class VirtualController {
+     private void rememberUndoOptions() { undoHaptics = localHaptics; undoFade = idleFade; undoContrast = highContrast; }
+     private void refreshElementVisibility() { for (VirtualControllerElement e : elements) e.refreshIdleVisibility(); }
+     private boolean saving;
++    private boolean controlsShown = true;
++    private boolean layoutInitialized;
++    private LayoutSafeArea safeArea;
++    private View safeAreaOutline;
+     private boolean geometryChangedWhileSaving;
+     private HashMap<String, JSONObject> beforeEdit;
+     private HashMap<String, JSONObject> undoEdit;
+@@ -98,6 +108,11 @@ public class VirtualController {
+     public boolean isSaving() { return saving; }
+     public int layoutWidth() { return context.getResources().getDisplayMetrics().widthPixels; }
+     public int layoutHeight() { return context.getResources().getDisplayMetrics().heightPixels; }
++    LayoutSafeArea safeArea() {
++        if (safeArea != null) return safeArea;
++        int width = layoutWidth(), height = layoutHeight();
++        return LayoutSafeArea.fromWindow(width, height, width, height, 0, 0, 0, 0, 0, 0);
++    }
+     private static String elementKey(VirtualControllerElement e) {
+         return e.elementId + ((e instanceof AnalogStick && ((AnalogStick)e).isFloating()) ? "_float" : "");
+     }
+@@ -113,6 +128,16 @@ public class VirtualController {
+         this.context = context;
+         this.handler = new Handler(Looper.getMainLooper());
+ 
++        frame_layout.setOnApplyWindowInsetsListener((view, insets) -> {
++            WindowInsets result = view.onApplyWindowInsets(insets);
++            view.post(this::refreshSafeAreaFromWindow);
++            return result;
++        });
++        frame_layout.addOnLayoutChangeListener((view, l, t, r, b, ol, ot, oright, ob) ->
++                view.post(this::refreshSafeAreaFromWindow));
++        refreshSafeAreaFromWindow();
++        frame_layout.requestApplyInsets();
++
+         buttonConfigure = new Button(context);
+         buttonConfigure.setAlpha(0.25f);
+         buttonConfigure.setFocusable(false);
+@@ -131,6 +156,7 @@ public class VirtualController {
+     }
+ 
+     public void hide() {
++        controlsShown = false;
+         releaseAll();
+         for (VirtualControllerElement element : elements) {
+             element.setVisibility(View.INVISIBLE);
+@@ -140,6 +166,7 @@ public class VirtualController {
+     }
+ 
+     public void show() {
++        controlsShown = true;
+         for (VirtualControllerElement element : elements) {
+             if (element.isControlEnabled()) element.setVisibility(View.VISIBLE);
+         }
+@@ -208,8 +235,8 @@ public class VirtualController {
+ 
+         int buttonSize = (int)(screen.heightPixels*0.06f);
+         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(buttonSize, buttonSize);
+-        params.leftMargin = 15;
+-        params.topMargin = 15;
++        params.leftMargin = safeArea().left + 15;
++        params.topMargin = safeArea().top + 15;
+         frame_layout.addView(buttonConfigure, params);
+ 
+         // Start with the default layout
+@@ -217,6 +244,9 @@ public class VirtualController {
+ 
+         // Preserve the legacy OSC profile as a fallback; new game profiles never modify it.
+         VirtualControllerConfigurationLoader.loadFromPreferences(this, context);
++        constrainElementsToSafeArea();
++        HashMap<String, JSONObject> fallback = null;
++        try { fallback = snapshotGeometry(); } catch (org.json.JSONException ignored) { }
+         profileStore = null;
+         profileRevision = 0; setVisualOptions(false, false, false);
+         try {
+@@ -226,10 +256,74 @@ public class VirtualController {
+             String identity = LayoutIdentity.key(libraryGameId, serverUuid, appId, orientation, floating, config.onlyL3R3, config.showGuideButton);
+             profileStore = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight());
+             profileRevision = profileStore.load(elements, this);
++            boolean adjusted = constrainElementsToSafeArea();
++            if (profileRevision > 0) {
++                try { profileStore.capture(elements, localHaptics, idleFade, highContrast); }
++                catch (Exception e) {
++                    if (fallback != null) applyGeometry(fallback);
++                    setVisualOptions(false, false, false);
++                    Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
++                    adjusted = false;
++                }
++            }
++            if (adjusted && profileRevision > 0) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
+         } catch (Exception e) {
+             Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show();
+         }
+         buttonConfigure.bringToFront(); refreshElementVisibility();
++        layoutInitialized = true;
++        if (!controlsShown) hide();
++    }
++
++    private void refreshSafeAreaFromWindow() {
++        if (Build.VERSION.SDK_INT < 23 || !frame_layout.isAttachedToWindow() || frame_layout.getWidth() <= 0 || frame_layout.getHeight() <= 0) return;
++        WindowInsets windowInsets = frame_layout.getRootWindowInsets();
++        if (windowInsets == null) return;
++        int l = 0, t = 0, r = 0, b = 0;
++        if (Build.VERSION.SDK_INT >= 30) {
++            Insets in = windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures() | WindowInsets.Type.displayCutout());
++            l = in.left; t = in.top; r = in.right; b = in.bottom;
++        } else if (Build.VERSION.SDK_INT >= 29) {
++            Insets in = windowInsets.getSystemGestureInsets();
++            l = in.left; t = in.top; r = in.right; b = in.bottom;
++            DisplayCutout cutout = windowInsets.getDisplayCutout();
++            if (cutout != null) { l = Math.max(l, cutout.getSafeInsetLeft()); t = Math.max(t, cutout.getSafeInsetTop()); r = Math.max(r, cutout.getSafeInsetRight()); b = Math.max(b, cutout.getSafeInsetBottom()); }
++        } else if (Build.VERSION.SDK_INT >= 28) {
++            DisplayCutout cutout = windowInsets.getDisplayCutout();
++            if (cutout != null) { l = cutout.getSafeInsetLeft(); t = cutout.getSafeInsetTop(); r = cutout.getSafeInsetRight(); b = cutout.getSafeInsetBottom(); }
++        }
++        int[] pos = new int[2]; frame_layout.getLocationInWindow(pos);
++        View root = frame_layout.getRootView();
++        try {
++            LayoutSafeArea next = LayoutSafeArea.fromWindow(Math.min(layoutWidth(), frame_layout.getWidth()), Math.min(layoutHeight(), frame_layout.getHeight()),
++                    root.getWidth(), root.getHeight(), pos[0], pos[1], l, t, r, b);
++            Rect visible = new Rect();
++            if (!frame_layout.getGlobalVisibleRect(visible)) return;
++            int[] screenPos = new int[2]; frame_layout.getLocationOnScreen(screenPos);
++            next = next.intersect(visible.left - screenPos[0], visible.top - screenPos[1],
++                    visible.right - screenPos[0], visible.bottom - screenPos[1]);
++            if (!next.equals(safeArea)) {
++                safeArea = next;
++                LimeLog.info("NXBridge control safe area " + next.left + "," + next.top + "-" + next.right + "," + next.bottom);
++                if (layoutInitialized) onDisplayChanged();
++            }
++        } catch (IllegalArgumentException e) {
++            // Do not replace a known area with incomplete transient window geometry.
++        }
++    }
++
++    boolean constrainElementsToSafeArea() {
++        boolean changed = false;
++        LayoutSafeArea safe = safeArea();
++        for (VirtualControllerElement element : elements) {
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)element.getLayoutParams();
++            int[] bounds = safe.constrain(p.leftMargin, p.topMargin, p.width, p.height);
++            if (p.leftMargin != bounds[0] || p.topMargin != bounds[1] || p.width != bounds[2] || p.height != bounds[3]) {
++                p.leftMargin = bounds[0]; p.topMargin = bounds[1]; p.width = bounds[2]; p.height = bounds[3];
++                element.requestLayout(); changed = true;
++            }
++        }
++        return changed;
+     }
+ 
+     public void onDisplayChanged() {
+@@ -271,7 +365,17 @@ public class VirtualController {
+         try {
+             HashMap<String, JSONObject> old = snapshotGeometry();
+             boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
+-            if (profileStore.previewPrevious(elements, this)) { undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast; invalidateElements(); }
++            if (profileStore.previewPrevious(elements, this)) {
++                try {
++                    boolean adjusted = constrainElementsToSafeArea();
++                    profileStore.capture(elements, localHaptics, idleFade, highContrast);
++                    undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast; invalidateElements();
++                    if (adjusted) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
++                } catch (Exception e) {
++                    applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast); invalidateElements();
++                    Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
++                }
++            }
+             else Toast.makeText(context, R.string.nxb_layout_no_previous, Toast.LENGTH_SHORT).show();
+         } catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
+     }
+@@ -293,6 +397,14 @@ public class VirtualController {
+         currentMode = ControllerMode.MoveButtons; refreshElementVisibility();
+         editorFinished = finished;
+         buttonConfigure.setVisibility(View.INVISIBLE);
++        LayoutSafeArea safe = safeArea();
++        safeAreaOutline = new View(context);
++        GradientDrawable outline = new GradientDrawable(); outline.setColor(0x00000000);
++        outline.setStroke(Math.max(1, (int)(2 * context.getResources().getDisplayMetrics().density)), 0x99A7DFB7);
++        safeAreaOutline.setBackground(outline);
++        FrameLayout.LayoutParams safeFrame = new FrameLayout.LayoutParams(safe.right - safe.left, safe.bottom - safe.top);
++        safeFrame.leftMargin = safe.left; safeFrame.topMargin = safe.top;
++        frame_layout.addView(safeAreaOutline, Math.max(0, frame_layout.indexOfChild(buttonConfigure)), safeFrame);
+         editorBar = new LinearLayout(context);
+         editorBar.setOrientation(LinearLayout.HORIZONTAL);
+         editorBar.setGravity(Gravity.CENTER_VERTICAL);
+@@ -320,7 +432,8 @@ public class VirtualController {
+         editorBar.addView(scroller, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+         addEditorButton(editorBar, R.string.nxb_layout_cancel, this::cancelEditing);
+         addEditorButton(editorBar, R.string.nxb_layout_save, this::saveEditing);
+-        FrameLayout.LayoutParams bar = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
++        FrameLayout.LayoutParams bar = new FrameLayout.LayoutParams(safe.right - safe.left, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
++        bar.leftMargin = safe.left; bar.topMargin = safe.top;
+         frame_layout.addView(editorBar, bar);
+         editorBar.bringToFront();
+         Toast.makeText(context, context instanceof com.limelight.Game ? R.string.nxb_layout_game_running : R.string.nxb_layout_preview, Toast.LENGTH_LONG).show();
+@@ -384,6 +497,7 @@ public class VirtualController {
+                         p.topMargin = Math.max(0, Math.min(height - p.height, p.topMargin + dy));
+                         element.requestLayout();
+                     }
++                    constrainElementsToSafeArea();
+                     editorStatus.setText(choices[which] + " · " + context.getString(R.string.nxb_layout_unsaved));
+                 }).setNegativeButton(android.R.string.cancel, null).show();
+     }
+@@ -414,6 +528,8 @@ public class VirtualController {
+             }
+             profileStore.capture(elements, localHaptics, idleFade, highContrast);
+             undoEdit = old; undoHaptics = h; undoFade = f; undoContrast = c;
++            constrainElementsToSafeArea();
++            profileStore.capture(elements, localHaptics, idleFade, highContrast);
+             editorStatus.setText(context.getString(R.string.nxb_import_draft)); invalidateElements();
+         } catch (Exception e) {
+             if (old != null) try { applyGeometry(old); } catch (Exception ignored) {}
+@@ -477,10 +593,11 @@ public class VirtualController {
+         // Build fresh defaults without reading either stored profile.
+         int buttonSize = (int)(layoutHeight()*0.06f);
+         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(buttonSize, buttonSize);
+-        params.leftMargin = 15; params.topMargin = 15;
++        params.leftMargin = safeArea().left + 15; params.topMargin = safeArea().top + 15;
+         frame_layout.addView(buttonConfigure, params);
+         buttonConfigure.setVisibility(View.INVISIBLE);
+         VirtualControllerConfigurationLoader.createDefaultLayout(this, context);
++        constrainElementsToSafeArea();
+         // Reset geometry only; preserve independent stick response settings.
+         if (undoEdit != null) for (VirtualControllerElement element : elements) {
+             JSONObject prior = undoEdit.get(elementKey(element));
+@@ -533,6 +650,7 @@ public class VirtualController {
+         releaseAll(); handler.removeCallbacks(delayedRetransmitRunnable);
+         currentMode = ControllerMode.Active;
+         if (editorBar != null) frame_layout.removeView(editorBar);
++        if (safeAreaOutline != null) { frame_layout.removeView(safeAreaOutline); safeAreaOutline = null; }
+         editorBar = null; beforeEdit = null; undoEdit = null;
+         buttonConfigure.setVisibility(View.VISIBLE); buttonConfigure.bringToFront();
+         if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+index f161451d..2b91903c 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -93,8 +93,9 @@ public abstract class VirtualControllerElement extends View {
+ 
+         FrameLayout.LayoutParams layoutParams = (FrameLayout.LayoutParams) getLayoutParams();
+ 
+-        layoutParams.leftMargin = Math.max(0, Math.min(newPos_x, virtualController.layoutWidth() - layoutParams.width));
+-        layoutParams.topMargin = Math.max(0, Math.min(newPos_y, virtualController.layoutHeight() - layoutParams.height));
++        LayoutSafeArea safe = virtualController.safeArea();
++        layoutParams.leftMargin = Math.max(safe.left, Math.min(newPos_x, safe.right - layoutParams.width));
++        layoutParams.topMargin = Math.max(safe.top, Math.min(newPos_y, safe.bottom - layoutParams.height));
+         layoutParams.rightMargin = 0;
+         layoutParams.bottomMargin = 0;
+ 
+@@ -108,8 +109,9 @@ public abstract class VirtualControllerElement extends View {
+         int newWidth = width + (startSize_x - pressed_x);
+ 
+         int minimum = (int)Math.ceil(48 * getResources().getDisplayMetrics().density);
+-        layoutParams.height = Math.min(Math.max(newHeight, minimum), virtualController.layoutHeight() - layoutParams.topMargin);
+-        layoutParams.width = Math.min(Math.max(newWidth, minimum), virtualController.layoutWidth() - layoutParams.leftMargin);
++        LayoutSafeArea safe = virtualController.safeArea();
++        layoutParams.height = Math.min(Math.max(newHeight, minimum), safe.bottom - layoutParams.topMargin);
++        layoutParams.width = Math.min(Math.max(newWidth, minimum), safe.right - layoutParams.leftMargin);
+ 
+         requestLayout();
+     }
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 8c8fafb3..f143048c 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -306,6 +306,8 @@
+     <string name="nxb_layout_entry">控制布局</string>
+     <string name="nxb_layout_preview">布局预览，不操作游戏</string>
+     <string name="nxb_layout_display_changed">屏幕尺寸已变化，未保存的布局没有应用</string>
++    <string name="nxb_layout_safe_adjusted">布局已临时适配安全区域；保存后生效，原文件未改动</string>
++    <string name="nxb_layout_safe_conflict">布局适配安全区域后有冲突，已显示默认布局；原文件未改动</string>
+     <string name="nxb_layout_undo">撤销</string>
+     <string name="nxb_layout_previous">上个版本</string>
+     <string name="nxb_layout_no_previous">没有上一个版本</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 87d535d0..782fb186 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -325,6 +325,8 @@
+     <string name="nxb_layout_entry">Control layout</string>
+     <string name="nxb_layout_preview">Layout preview · no game input</string>
+     <string name="nxb_layout_display_changed">Display changed; unsaved layout was not applied</string>
++    <string name="nxb_layout_safe_adjusted">Layout adjusted for the safe area. Save to keep these changes; the original file is unchanged.</string>
++    <string name="nxb_layout_safe_conflict">Layout cannot fit the safe area without conflicting controls. Defaults are shown; the original file is unchanged.</string>
+     <string name="nxb_layout_undo">Undo</string>
+     <string name="nxb_layout_previous">Previous version</string>
+     <string name="nxb_layout_no_previous">No previous version</string>

@@ -1,0 +1,195 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 378
++        versionCode = 379
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -123,6 +123,7 @@
+     private TextView editorStatus;
+     private Button faceGroupButton;
+     private boolean faceGroupMove;
++    private int[][] faceResizeOrigin;
+     private Runnable editorFinished;
+ 
+     public boolean isSaving() { return saving; }
+@@ -383,14 +384,14 @@
+         return e.elementId >= VirtualControllerElement.EID_A && e.elementId <= VirtualControllerElement.EID_Y;
+     }
+     boolean faceGroupSelected(VirtualControllerElement e) {
+-        return faceGroupMove && currentMode == ControllerMode.MoveButtons && isFaceButton(e);
++        return faceGroupMove && (currentMode == ControllerMode.MoveButtons || currentMode == ControllerMode.ResizeButtons) && isFaceButton(e);
+     }
+     private void updateFaceGroupButton() {
+         if (faceGroupButton != null) faceGroupButton.setText(faceGroupMove ? R.string.nxb_face_group_on : R.string.nxb_face_group_off);
+     }
+     /** Return true when the movement was handled as a group, including a blocked drag. */
+     boolean moveFaceGroup(VirtualControllerElement selected, int dx, int dy) {
+-        if (!faceGroupSelected(selected)) return false;
++        if (!faceGroupSelected(selected) || currentMode != ControllerMode.MoveButtons) return false;
+         java.util.ArrayList<VirtualControllerElement> members = new java.util.ArrayList<>();
+         java.util.ArrayList<int[]> obstacles = new java.util.ArrayList<>();
+         for (VirtualControllerElement e : elements) {
+@@ -416,9 +417,56 @@
+         }
+         return true;
+     }
++    private java.util.ArrayList<VirtualControllerElement> faceMembers() {
++        java.util.ArrayList<VirtualControllerElement> members = new java.util.ArrayList<>();
++        for (VirtualControllerElement e : elements) if (e.isControlEnabled() && isFaceButton(e)) members.add(e);
++        return members;
++    }
++    private int[][] faceObstacles() {
++        java.util.ArrayList<int[]> obstacles = new java.util.ArrayList<>();
++        for (VirtualControllerElement e : elements) {
++            if (!e.isControlEnabled() || isFaceButton(e) || (e instanceof AnalogStick && ((AnalogStick)e).isFloating())) continue;
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++            obstacles.add(new int[]{p.leftMargin, p.topMargin, p.width, p.height});
++        }
++        LayoutSafeArea safe = safeArea(); int gear = (int)(layoutHeight() * 0.06f);
++        obstacles.add(new int[]{safe.left + 15, safe.top + 15, gear, gear});
++        return obstacles.toArray(new int[0][]);
++    }
++    /** Scale from the start of this gesture, avoiding accumulated rounding drift. */
++    boolean resizeFaceGroup(VirtualControllerElement selected, int dx, int dy) {
++        if (!faceGroupSelected(selected) || currentMode != ControllerMode.ResizeButtons) return false;
++        java.util.ArrayList<VirtualControllerElement> members = faceMembers();
++        if (members.size() != 4 || faceResizeOrigin == null) return true;
++        int index = members.indexOf(selected); if (index < 0) return true;
++        int[] anchor = faceResizeOrigin[index];
++        double scale = 1.0 + ((double)dx + dy) / (2.0 * Math.max(anchor[2], anchor[3]));
++        LayoutSafeArea safe = safeArea();
++        int min = (int)Math.ceil(48 * context.getResources().getDisplayMetrics().density);
++        int[][] result = FaceGroupResize.plan(faceResizeOrigin, faceObstacles(),
++                safe.left, safe.top, safe.right, safe.bottom, min, scale);
++        if (result == null) return true;
++        for (int i = 0; i < 4; i++) {
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)members.get(i).getLayoutParams();
++            p.leftMargin = result[i][0]; p.topMargin = result[i][1]; p.width = result[i][2]; p.height = result[i][3];
++            members.get(i).requestLayout();
++        }
++        return true;
++    }
+     void beginElementEdit(VirtualControllerElement element) {
+         if (!isEditing() || saving || currentMode == ControllerMode.TestButtons) return;
+         try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
++        faceResizeOrigin = null;
++        if (faceGroupSelected(element) && currentMode == ControllerMode.ResizeButtons) {
++            java.util.ArrayList<VirtualControllerElement> members = faceMembers();
++            if (members.size() == 4) {
++                faceResizeOrigin = new int[4][];
++                for (int i = 0; i < 4; i++) {
++                    FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)members.get(i).getLayoutParams();
++                    faceResizeOrigin[i] = new int[]{p.leftMargin, p.topMargin, p.width, p.height};
++                }
++            }
++        }
+         String name = element instanceof DigitalButton ? ((DigitalButton)element).getLabel() :
+                 element.elementId == VirtualControllerElement.EID_LS ? context.getString(R.string.nxb_layout_left_stick) :
+                 element.elementId == VirtualControllerElement.EID_RS ? context.getString(R.string.nxb_layout_right_stick) :
+@@ -545,7 +593,8 @@
+             faceGroupButton.setOnClickListener(v -> {
+                 if (saving) return;
+                 faceGroupMove = !faceGroupMove;
+-                setEditMode(ControllerMode.MoveButtons); updateFaceGroupButton(); invalidateElements();
++                setEditMode(currentMode == ControllerMode.ResizeButtons ? ControllerMode.ResizeButtons : ControllerMode.MoveButtons);
++                updateFaceGroupButton(); invalidateElements();
+             });
+             row.addView(faceGroupButton);
+         }
+@@ -582,7 +631,8 @@
+     private void setEditMode(ControllerMode mode) {
+         if (!isEditing() || saving) return;
+         releaseAll(); currentMode = mode;
+-        if (mode != ControllerMode.MoveButtons) { faceGroupMove = false; updateFaceGroupButton(); }
++        if (mode == ControllerMode.TestButtons) { faceGroupMove = false; updateFaceGroupButton(); }
++        faceResizeOrigin = null;
+         editorStatus.setText(mode == ControllerMode.TestButtons ? context.getString(R.string.nxb_layout_test_hint) : context.getString(R.string.nxb_layout_unsaved));
+         invalidateElements();
+     }
+@@ -850,7 +900,7 @@
+         currentMode = ControllerMode.Active;
+         if (editorBar != null) frame_layout.removeView(editorBar);
+         if (safeAreaOutline != null) { frame_layout.removeView(safeAreaOutline); safeAreaOutline = null; }
+-        editorBar = null; faceGroupButton = null; faceGroupMove = false; beforeEdit = null; undoEdit = null;
++        editorBar = null; faceGroupButton = null; faceGroupMove = false; faceResizeOrigin = null; beforeEdit = null; undoEdit = null;
+         buttonConfigure.setVisibility(View.VISIBLE); buttonConfigure.bringToFront();
+         if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
+         invalidateElements(); refreshElementVisibility();
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -55,6 +55,7 @@
+ 
+     float position_pressed_x = 0;
+     float position_pressed_y = 0;
++    private float nxbResizeDownRawX, nxbResizeDownRawY;
+ 
+     private enum Mode {
+         Normal,
+@@ -308,6 +309,7 @@
+                 virtualController.beginElementEdit(this);
+                 position_pressed_x = event.getX();
+                 position_pressed_y = event.getY();
++                nxbResizeDownRawX = event.getRawX(); nxbResizeDownRawY = event.getRawY();
+                 startSize_x = getWidth();
+                 startSize_y = getHeight();
+ 
+@@ -329,6 +331,8 @@
+                         break;
+                     }
+                     case Resize: {
++                        if (virtualController.resizeFaceGroup(this, (int)(event.getRawX() - nxbResizeDownRawX),
++                                (int)(event.getRawY() - nxbResizeDownRawY))) break;
+                         resizeElement(
+                                 (int) position_pressed_x,
+                                 (int) position_pressed_y,
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/FaceGroupResize.java
+@@ -0,0 +1,41 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Uniformly scale a group around its bounding-box center or reject the candidate. */
++public final class FaceGroupResize {
++    private FaceGroupResize() { }
++
++    public static int[][] plan(int[][] group, int[][] obstacles, int left, int top, int right, int bottom, int minSize, double scale) {
++        if (group == null || group.length != 4 || obstacles == null || right <= left || bottom <= top ||
++                minSize <= 0 || (Double.isNaN(scale) || Double.isInfinite(scale)) || scale <= 0 || scale > 10) return null;
++        long x1 = Long.MAX_VALUE, y1 = Long.MAX_VALUE, x2 = Long.MIN_VALUE, y2 = Long.MIN_VALUE;
++        for (int[] r : group) {
++            if (r == null || r.length != 4 || r[2] <= 0 || r[3] <= 0) return null;
++            x1 = Math.min(x1, r[0]); y1 = Math.min(y1, r[1]);
++            x2 = Math.max(x2, (long)r[0] + r[2]); y2 = Math.max(y2, (long)r[1] + r[3]);
++        }
++        double centerX = (x1 + x2) / 2.0, centerY = (y1 + y2) / 2.0;
++        int[][] out = new int[4][4];
++        for (int i = 0; i < 4; i++) {
++            int[] r = group[i];
++            long x = Math.round(centerX + (r[0] - centerX) * scale);
++            long y = Math.round(centerY + (r[1] - centerY) * scale);
++            long xEnd = Math.round(centerX + ((long)r[0] + r[2] - centerX) * scale);
++            long yEnd = Math.round(centerY + ((long)r[1] + r[3] - centerY) * scale);
++            long w = xEnd - x, h = yEnd - y;
++            if (w < minSize || h < minSize || x < left || y < top || x + w > right || y + h > bottom ||
++                    x < Integer.MIN_VALUE || y < Integer.MIN_VALUE || w > Integer.MAX_VALUE || h > Integer.MAX_VALUE) return null;
++            out[i] = new int[]{(int)x, (int)y, (int)w, (int)h};
++        }
++        for (int i = 0; i < 4; i++) {
++            for (int j = i + 1; j < 4; j++) if (overlaps(out[i], out[j])) return null;
++            for (int[] o : obstacles) {
++                if (o == null || o.length != 4 || o[2] <= 0 || o[3] <= 0 || overlaps(out[i], o)) return null;
++            }
++        }
++        return out;
++    }
++    private static boolean overlaps(int[] a, int[] b) {
++        return (long)a[0] < (long)b[0] + b[2] && (long)a[0] + a[2] > b[0] &&
++                (long)a[1] < (long)b[1] + b[3] && (long)a[1] + a[3] > b[1];
++    }
++}

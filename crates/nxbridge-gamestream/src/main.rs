@@ -14,8 +14,31 @@ use nxbridge_media::{AudioLeases, Epoch, VideoLeases, RELEASE_ENCODED};
 use nxbridge_stream::{annexb::AnnexBSplitter, synthetic::SyntheticSource};
 use std::{process::Stdio, sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+mod catalog;
 mod game;
 mod game_input;
+mod synthetic_input;
+
+fn application_config(
+    game_mode: bool,
+    title: Option<String>,
+    boxart: Option<std::path::PathBuf>,
+) -> ApplicationConfig {
+    if game_mode {
+        ApplicationConfig {
+            title: title
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "NXBridge game".into()),
+            boxart,
+            ..Default::default()
+        }
+    } else {
+        ApplicationConfig {
+            title: "NXBridge synthetic".into(),
+            ..Default::default()
+        }
+    }
+}
 
 fn clock_ns() -> u64 {
     let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
@@ -56,13 +79,18 @@ async fn main() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
         .expect("protect state directory");
     let mut c = Config::default();
-    let game_mode = std::env::var_os("NXB_GAME_WORKER").is_some();
+    let library_covers = std::env::var_os("NXB_LIBRARY_COVER_DIR").map(std::path::PathBuf::from);
+    let catalog = std::env::var_os("NXB_GAME_CATALOG").map(|p| {
+        catalog::load(std::path::Path::new(&p), library_covers.as_deref())
+            .expect("invalid NXB_GAME_CATALOG")
+    });
+    let game_mode = catalog.is_some() || std::env::var_os("NXB_GAME_WORKER").is_some();
     c.name = std::env::var("NXB_HOST_NAME")
         .ok()
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| {
             if game_mode {
-                "NXBridge game"
+                "NXBridge Games"
             } else {
                 "NXBridge synthetic 032"
             }
@@ -79,15 +107,37 @@ async fn main() {
     c.webserver.enable_pairing = true;
     c.webserver.certificate = path.join("cert.pem");
     c.webserver.private_key = path.join("key.pem");
-    c.applications = vec![ApplicationConfig {
-        title: if game_mode {
-            "NXBridge game"
-        } else {
-            "NXBridge synthetic"
+    let mut boxart = (game_mode && catalog.is_none())
+        .then(|| std::env::var_os("NXB_APP_BOXART"))
+        .flatten()
+        .map(std::path::PathBuf::from);
+    if let (None, Some(dir), Ok(id)) = (
+        &catalog,
+        &library_covers,
+        std::env::var("NXB_LIBRARY_GAME_ID"),
+    ) {
+        boxart = Some(catalog::library_cover(dir, &id).expect("invalid library cover mapping"));
+    } else if let Some(path) = &boxart {
+        assert!(
+            path.is_absolute() && path.is_file(),
+            "NXB_APP_BOXART must be an existing absolute file"
+        );
+    }
+    c.applications = match &catalog {
+        Some(games) => games.iter().map(|game| game.application()).collect(),
+        None => vec![application_config(
+            game_mode,
+            std::env::var("NXB_APP_TITLE").ok(),
+            boxart,
+        )],
+    };
+    if game_mode && catalog.is_none() {
+        if let Ok(id) = std::env::var("NXB_LIBRARY_GAME_ID") {
+            catalog::library_cover(std::path::Path::new("/"), &id)
+                .expect("invalid library game ID");
+            c.applications[0].library_game_id = Some(id);
         }
-        .into(),
-        ..Default::default()
-    }];
+    }
     let shutdown = ShutdownManager::new();
     let (cert, key) = moonshine_core::tls::load_or_create_certificate(&c).expect("certificate");
     let manager = SessionManager::new(
@@ -151,15 +201,69 @@ async fn main() {
             }
         }
     });
-    tokio::spawn(session_pump(manager.clone()));
-    let _ = tokio::signal::ctrl_c().await;
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let mut pump = tokio::spawn(session_pump(manager.clone(), catalog, stop_rx));
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("register SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = terminate.recv() => {},
+    }
+    let _ = stop_tx.send(true);
     let _ = manager.stop_session().await;
+    // A free protocol session can precede worker teardown. Wait for our
+    // session pump so its per-session process group is actually reaped.
+    if tokio::time::timeout(Duration::from_secs(8), &mut pump)
+        .await
+        .is_err()
+    {
+        pump.abort();
+        let _ = pump.await;
+    }
 }
 
-async fn session_pump(manager: SessionManager) {
+#[cfg(test)]
+mod application_tests {
+    use super::application_config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn game_metadata_is_optional_and_synthetic_is_unchanged() {
+        let game = application_config(
+            true,
+            Some("旷野之息".into()),
+            Some(PathBuf::from("/art.png")),
+        );
+        assert_eq!(game.title, "旷野之息");
+        assert_eq!(game.boxart, Some(PathBuf::from("/art.png")));
+        assert_eq!(
+            application_config(true, Some(" ".into()), None).title,
+            "NXBridge game"
+        );
+        let synthetic = application_config(
+            false,
+            Some("ignored".into()),
+            Some(PathBuf::from("/art.png")),
+        );
+        assert_eq!(synthetic.title, "NXBridge synthetic");
+        assert_eq!(synthetic.boxart, None);
+    }
+}
+
+async fn session_pump(
+    manager: SessionManager,
+    catalog: Option<Vec<catalog::Game>>,
+    stopping: tokio::sync::watch::Receiver<bool>,
+) {
     let mut generation = 0u64;
     loop {
+        if *stopping.borrow() {
+            return;
+        }
         let tx = loop {
+            if *stopping.borrow() {
+                return;
+            }
             if let Some(tx) = manager.video_frame_sender().await {
                 break tx;
             }
@@ -196,7 +300,25 @@ async fn session_pump(manager: SessionManager) {
             session_id: sid,
             generation,
         };
-        if std::env::var_os("NXB_GAME_WORKER").is_some() {
+        if catalog.is_some() || std::env::var_os("NXB_GAME_WORKER").is_some() {
+            let selected = if let Some(games) = &catalog {
+                let id = manager
+                    .get_session_context()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|c| c.application_id);
+                match id.and_then(|id| catalog::select(games, id)) {
+                    Some(game) => Some(game),
+                    None => {
+                        eprintln!("no game configuration for active application");
+                        let _ = manager.stop_session().await;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             if ctx.width != 1280 || ctx.height != 720 {
                 eprintln!("game prototype requires 1280x720 H.264 at 30 fps");
             } else if let Some(input) = input.take() {
@@ -205,7 +327,9 @@ async fn session_pump(manager: SessionManager) {
                         while r.recv().await.is_some() {}
                     }
                 });
-                if let Err(e) = game::run(manager.clone(), epoch, tx, audio_tx, input).await {
+                if let Err(e) =
+                    game::run(manager.clone(), epoch, tx, audio_tx, input, selected).await
+                {
                     eprintln!("game bridge failed: {e}");
                 }
                 controls.abort();
@@ -419,21 +543,16 @@ async fn session_pump(manager: SessionManager) {
             }
         });
         let inputs = tokio::spawn(async move {
-            if let Some(ref mut r) = input {
-                let mut buttons = 0u16;
-                while let Some(v) = r.recv().await {
-                    if let Some(current) = controller_buttons(&v) {
-                        if current != buttons {
-                            buttons = current;
-                            println!("session controller buttons=0x{buttons:04x}");
-                        }
-                    }
+            if let Some(r) = input.take() {
+                if let Err(error) = synthetic_input::observe(r).await {
+                    eprintln!("synthetic input observer failed: {error}");
                 }
             }
         });
         loop {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            if frames.is_finished()
+            if *stopping.borrow()
+                || frames.is_finished()
                 || video.is_finished()
                 || audio.is_finished()
                 || manager.video_frame_sender().await.is_none()
@@ -450,32 +569,5 @@ async fn session_pump(manager: SessionManager) {
         inputs.abort();
         let _ = child.kill().await;
         let _ = child.wait().await;
-    }
-}
-
-/// GameStream's multi-controller packets carry a complete button state.
-fn controller_buttons(payload: &[u8]) -> Option<u16> {
-    if payload.len() < 24 {
-        return None;
-    }
-    let magic = u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?);
-    if magic != 0x0d && magic != 0x0c {
-        return None;
-    }
-    Some(u16::from_le_bytes(payload.get(12..14)?.try_into().ok()?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::controller_buttons;
-    #[test]
-    fn controller_states_and_short_packets() {
-        let mut packet = [0u8; 30];
-        packet[0] = 0x0d;
-        packet[13] = 0x10;
-        assert_eq!(controller_buttons(&packet), Some(0x1000));
-        packet[13] = 0;
-        assert_eq!(controller_buttons(&packet), Some(0));
-        assert_eq!(controller_buttons(&packet[..6]), None);
     }
 }

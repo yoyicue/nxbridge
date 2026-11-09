@@ -1,0 +1,58 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 373
++        versionCode = 375
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -1221,6 +1221,7 @@
+     private boolean nxbLayoutSuppressed, nxbLifecycleSuppressed;
+     private final HashSet<Long> nxbHeldPhysicalKeys = new HashSet<>();
+     private final HashSet<Long> nxbBlockedPhysicalKeys = new HashSet<>();
++    private long nxbLastHeldKeyHintMs;
+     private static void nxbForgetPhysicalDevice(HashSet<Long> keys, int deviceId) {
+         for (Iterator<Long> it = keys.iterator(); it.hasNext();) {
+             if ((int)(it.next() >>> 32) == deviceId) it.remove();
+@@ -2722,7 +2723,19 @@
+         // can deliver repeats for a button held while the stream lost focus.
+         // Do not let that old hold reclaim control after lifecycle neutralization.
+         long key = nxbPhysicalKey(event);
+-        if (nxbBlockedPhysicalKeys.contains(key) || event.getRepeatCount() != 0) return true;
++        if (nxbBlockedPhysicalKeys.contains(key)) {
++            long now = android.os.SystemClock.uptimeMillis();
++            if (!nxbInputSuppressed && event.getRepeatCount() == 0 &&
++                    (nxbLastHeldKeyHintMs == 0 || now - nxbLastHeldKeyHintMs >= 2500)) {
++                nxbLastHeldKeyHintMs = now;
++                activityContext.runOnUiThread(() -> {
++                    if (!activityContext.isFinishing() && !activityContext.isDestroyed())
++                        Toast.makeText(activityContext, R.string.nxb_release_controller_key, Toast.LENGTH_LONG).show();
++                });
++            }
++            return true;
++        }
++        if (event.getRepeatCount() != 0) return true;
+         nxbHeldPhysicalKeys.add(key);
+         if (nxbInputSuppressed) nxbBlockedPhysicalKeys.add(key);
+         InputDeviceContext context = getContextForEvent(event);
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -391,4 +391,5 @@
+     <string name="nxb_portable_conflict">The layout or display changed. Reopen the editor before importing.</string>
+     <string name="nxb_portable_export_done">Layout draft exported.</string>
+     <string name="nxb_portable_restored">Previous draft restored · not saved</string>
++    <string name="nxb_release_controller_key">Release the controller button, then press it again.</string>
+ </resources>
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -372,4 +372,5 @@
+     <string name="nxb_portable_conflict">布局或屏幕已变化，请重新打开编辑器后导入。</string>
+     <string name="nxb_portable_export_done">布局草稿已导出。</string>
+     <string name="nxb_portable_restored">已恢复之前的草稿 · 未保存</string>
++    <string name="nxb_release_controller_key">请松开手柄按键，再按一次。</string>
+ </resources>

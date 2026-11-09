@@ -1,0 +1,192 @@
+diff --git a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -245,6 +245,7 @@
+ 
+     @Override
+     public synchronized void onInputDeviceRemoved(int deviceId) {
++        nxbFlushPendingRelease();
+         nxbForgetPhysicalDevice(nxbHeldPhysicalKeys, deviceId);
+         nxbForgetPhysicalDevice(nxbBlockedPhysicalKeys, deviceId);
+         InputDeviceContext context = inputDeviceContexts.get(deviceId);
+@@ -260,6 +261,7 @@
+     // Input devices that have a trackpad may gain/lose AXIS_RELATIVE_X/Y.
+     @Override
+     public synchronized void onInputDeviceChanged(int deviceId) {
++        nxbFlushPendingRelease();
+         InputDevice device = InputDevice.getDevice(deviceId);
+         if (device == null) {
+             return;
+@@ -279,7 +281,8 @@
+         inputDeviceContexts.put(deviceId, newContext);
+     }
+ 
+-    public void stop() {
++    public synchronized void stop() {
++        nxbCancelPendingRelease();
+         if (stopped) {
+             return;
+         }
+@@ -1267,6 +1270,7 @@
+     }
+     /** A new touch, rather than a retransmission of an old one, claims control. */
+     public synchronized void claimTouchInput() {
++        nxbFlushPendingRelease();
+         if (nxbInputSuppressed || nxbAwaitingNeutral) return;
+         if (nxbSources.claimTouch(nxbPhysicalNeutral())) {
+             LimeLog.info("NXBridge input source: touch"); nxbPublishNeutral();
+@@ -1299,6 +1303,7 @@
+     private void updateInputSuppression() {
+         boolean suppress = nxbLayoutSuppressed || nxbLifecycleSuppressed || nxbStartupSuppressed;
+         if (suppress == nxbInputSuppressed) return;
++        nxbFlushPendingRelease();
+         if (suppress) {
+             nxbBlockedPhysicalKeys.addAll(nxbHeldPhysicalKeys);
+             nxbInputSuppressed = true;
+@@ -1855,7 +1860,8 @@
+                 normalizedX, normalizedY, normalizedPressure) != MoonBridge.LI_ERR_UNSUPPORTED;
+     }
+ 
+-    public boolean tryHandleTouchpadEvent(MotionEvent event) {
++    public synchronized boolean tryHandleTouchpadEvent(MotionEvent event) {
++        nxbFlushPendingRelease();
+         // Bail if this is not a touchpad or mouse event
+         if (event.getSource() != InputDevice.SOURCE_TOUCHPAD &&
+                 event.getSource() != InputDevice.SOURCE_MOUSE) {
+@@ -1977,6 +1983,7 @@
+     }
+ 
+     public synchronized boolean handleMotionEvent(MotionEvent event) {
++        nxbFlushPendingRelease();
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;
+@@ -2490,7 +2497,55 @@
+         }
+     }
+ 
++    // At most one release is pending: any later input event flushes it first.
++    // This preserves event order without sleeping on Android's input/UI thread.
++    private NxbPendingRelease nxbPendingRelease;
++    private final class NxbPendingRelease implements Runnable {
++        private final InputDeviceContext context;
++        private final int keyCode;
++        private final KeyEvent event;
++        NxbPendingRelease(InputDeviceContext context, int keyCode, KeyEvent event) {
++            this.context = context; this.keyCode = keyCode; this.event = event;
++        }
++        @Override public void run() {
++            synchronized (ControllerHandler.this) {
++                if (nxbPendingRelease != this) return;
++                nxbPendingRelease = null;
++                if (!stopped) nxbApplyButtonUp(context, keyCode, event);
++            }
++        }
++    }
++    private void nxbFlushPendingRelease() {
++        if (nxbPendingRelease == null) return;
++        NxbPendingRelease pending = nxbPendingRelease;
++        mainThreadHandler.removeCallbacks(pending);
++        pending.run();
++    }
++    private void nxbCancelPendingRelease() {
++        if (nxbPendingRelease == null) return;
++        NxbPendingRelease pending = nxbPendingRelease;
++        nxbPendingRelease = null;
++        mainThreadHandler.removeCallbacks(pending);
++    }
++    private boolean nxbKnownRelease(InputDeviceContext context, KeyEvent event, int keyCode) {
++        switch (keyCode) {
++            case KeyEvent.KEYCODE_BUTTON_MODE: case KeyEvent.KEYCODE_BUTTON_START: case KeyEvent.KEYCODE_MENU:
++            case KeyEvent.KEYCODE_BACK: case KeyEvent.KEYCODE_BUTTON_SELECT:
++            case KeyEvent.KEYCODE_DPAD_LEFT: case KeyEvent.KEYCODE_DPAD_RIGHT: case KeyEvent.KEYCODE_DPAD_UP:
++            case KeyEvent.KEYCODE_DPAD_DOWN: case KeyEvent.KEYCODE_DPAD_UP_LEFT: case KeyEvent.KEYCODE_DPAD_UP_RIGHT:
++            case KeyEvent.KEYCODE_DPAD_DOWN_LEFT: case KeyEvent.KEYCODE_DPAD_DOWN_RIGHT: case KeyEvent.KEYCODE_DPAD_CENTER:
++            case KeyEvent.KEYCODE_BUTTON_A: case KeyEvent.KEYCODE_BUTTON_B: case KeyEvent.KEYCODE_BUTTON_X: case KeyEvent.KEYCODE_BUTTON_Y:
++            case KeyEvent.KEYCODE_BUTTON_L1: case KeyEvent.KEYCODE_BUTTON_R1: case KeyEvent.KEYCODE_BUTTON_THUMBL:
++            case KeyEvent.KEYCODE_BUTTON_THUMBR: case KeyEvent.KEYCODE_MEDIA_RECORD: case KeyEvent.KEYCODE_BUTTON_1:
++            case KeyEvent.KEYCODE_BUTTON_L2: case KeyEvent.KEYCODE_BUTTON_R2: return true;
++            case KeyEvent.KEYCODE_UNKNOWN:
++                return context.hasPaddles && event.getScanCode() >= 0x2c4 && event.getScanCode() <= 0x2c7;
++            default: return false;
++        }
++    }
++
+     public synchronized boolean handleButtonUp(KeyEvent event) {
++        nxbFlushPendingRelease();
+         // Android can synthesize a cancelled UP when focus changes. It does
+         // not prove the physical button was released, so retain the barrier.
+         if (!event.isCanceled()) {
+@@ -2512,26 +2567,18 @@
+             keyCode = handleFlipFaceButtons(keyCode);
+         }
+ 
+-        // If the button hasn't been down long enough, sleep for a bit before sending the up event
+-        // This allows "instant" button presses (like OUYA's virtual menu button) to work. This
+-        // path should not be triggered during normal usage.
+-        int buttonDownTime = (int)(event.getEventTime() - event.getDownTime());
+-        if (buttonDownTime < ControllerHandler.MINIMUM_BUTTON_DOWN_TIME_MS)
+-        {
+-            // Since our sleep time is so short (<= 25 ms), it shouldn't cause a problem doing this
+-            // in the UI thread.
+-            try {
+-                Thread.sleep(ControllerHandler.MINIMUM_BUTTON_DOWN_TIME_MS - buttonDownTime);
+-            } catch (InterruptedException e) {
+-                e.printStackTrace();
+-
+-                // InterruptedException clears the thread's interrupt status. Since we can't
+-                // handle that here, we will re-interrupt the thread to set the interrupt
+-                // status back to true.
+-                Thread.currentThread().interrupt();
+-            }
+-        }
+-
++        long heldMs = event.getEventTime() - event.getDownTime();
++        if (!event.isCanceled() && !nxbInputSuppressed && !nxbAwaitingNeutral && heldMs >= 0 &&
++                heldMs < MINIMUM_BUTTON_DOWN_TIME_MS && nxbKnownRelease(context, event, keyCode)) {
++            nxbPendingRelease = new NxbPendingRelease(context, keyCode, new KeyEvent(event));
++            if (!mainThreadHandler.postDelayed(nxbPendingRelease, MINIMUM_BUTTON_DOWN_TIME_MS - heldMs))
++                nxbFlushPendingRelease();
++            return true;
++        }
++        return nxbApplyButtonUp(context, keyCode, event);
++    }
++
++    private boolean nxbApplyButtonUp(InputDeviceContext context, int keyCode, KeyEvent event) {
+         switch (keyCode) {
+         case KeyEvent.KEYCODE_BUTTON_MODE:
+             context.inputMap &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
+@@ -2735,6 +2782,7 @@
+     }
+ 
+     public synchronized boolean handleButtonDown(KeyEvent event) {
++        nxbFlushPendingRelease();
+         // A repeated DOWN is not a new physical press. In particular, Android
+         // can deliver repeats for a button held while the stream lost focus.
+         // Do not let that old hold reclaim control after lifecycle neutralization.
+@@ -2982,6 +3030,9 @@
+                                short leftStickX, short leftStickY,
+                                short rightStickX, short rightStickY,
+                                byte leftTrigger, byte rightTrigger) {
++        if (buttonFlags != oscContext.inputMap || leftStickX != oscContext.leftStickX || leftStickY != oscContext.leftStickY ||
++                rightStickX != oscContext.rightStickX || rightStickY != oscContext.rightStickY ||
++                leftTrigger != oscContext.leftTrigger || rightTrigger != oscContext.rightTrigger) nxbFlushPendingRelease();
+         oscContext.leftStickX = leftStickX;
+         oscContext.leftStickY = leftStickY;
+ 
+@@ -3001,6 +3052,7 @@
+                                       float leftStickX, float leftStickY,
+                                       float rightStickX, float rightStickY,
+                                       float leftTrigger, float rightTrigger) {
++        nxbFlushPendingRelease();
+         GenericControllerContext context = usbDeviceContexts.get(controllerId);
+         if (context == null) {
+             return;
+@@ -3037,6 +3089,7 @@
+ 
+     @Override
+     public synchronized void deviceRemoved(AbstractController controller) {
++        nxbFlushPendingRelease();
+         UsbDeviceContext context = usbDeviceContexts.get(controller.getControllerId());
+         if (context != null) {
+             LimeLog.info("Removed controller: "+controller.getControllerId());

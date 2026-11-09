@@ -1,0 +1,70 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 383
++        versionCode = 384
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -520,6 +520,9 @@
+                 httpsPort, uniqueId, config,
+                 PlatformBinding.getCryptoProvider(this), serverCert);
+         controllerHandler = new ControllerHandler(this, conn, this, prefConfig);
++        // The loading overlay is not a game input surface. Set this before
++        // the connection starts, without sending packets on an idle bridge.
++        controllerHandler.prepareStartupInputSuppression();
+         keyboardTranslator = new KeyboardTranslator();
+ 
+         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+@@ -575,6 +578,7 @@
+     private void nxbFinishLoading() {
+         if (isFinishing() || displayedFailureDialog || nxbLoading.getVisibility() != View.VISIBLE) return;
+         nxbLoading.setVisibility(View.GONE);
++        if (controllerHandler != null) controllerHandler.finishStartupInputSuppression();
+         if (virtualController != null && !isHidingOverlays) virtualController.show();
+     }
+ 
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -1218,7 +1218,7 @@
+     }
+ 
+     private volatile boolean nxbInputSuppressed;
+-    private boolean nxbLayoutSuppressed, nxbLifecycleSuppressed;
++    private boolean nxbLayoutSuppressed, nxbLifecycleSuppressed, nxbStartupSuppressed;
+     private final HashSet<Long> nxbHeldPhysicalKeys = new HashSet<>();
+     private final HashSet<Long> nxbBlockedPhysicalKeys = new HashSet<>();
+     private long nxbLastHeldKeyHintMs;
+@@ -1273,6 +1273,18 @@
+         }
+     }
+ 
++    /** Only call before connecting; no native packets are sent on an idle bridge. */
++    public synchronized void prepareStartupInputSuppression() {
++        nxbStartupSuppressed = true;
++        nxbInputSuppressed = true;
++        nxbAwaitingNeutral = true;
++    }
++
++    public synchronized void finishStartupInputSuppression() {
++        nxbStartupSuppressed = false;
++        updateInputSuppression();
++    }
++
+     /** Editing and lifecycle suppression are independent; neither can release the other. */
+     public synchronized void setLayoutInputSuppressed(boolean suppress) {
+         nxbLayoutSuppressed = suppress;
+@@ -1285,7 +1297,7 @@
+     }
+ 
+     private void updateInputSuppression() {
+-        boolean suppress = nxbLayoutSuppressed || nxbLifecycleSuppressed;
++        boolean suppress = nxbLayoutSuppressed || nxbLifecycleSuppressed || nxbStartupSuppressed;
+         if (suppress == nxbInputSuppressed) return;
+         if (suppress) {
+             nxbBlockedPhysicalKeys.addAll(nxbHeldPhysicalKeys);

@@ -1,0 +1,179 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 390
++        versionCode = 391
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/FaceGroupMovement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/FaceGroupMovement.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/FaceGroupMovement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/FaceGroupMovement.java
+@@ -5,7 +5,7 @@
+     private FaceGroupMovement() { }
+ 
+     public static int[] clamp(int[][] group, int[][] obstacles, int left, int top, int right, int bottom, int dx, int dy) {
+-        if (group == null || group.length != 4 || obstacles == null || right <= left || bottom <= top) return new int[]{0, 0};
++        if (group == null || group.length < 1 || group.length > 16 || obstacles == null || right <= left || bottom <= top) return new int[]{0, 0};
+         long minX = Long.MIN_VALUE, maxX = Long.MAX_VALUE, minY = Long.MIN_VALUE, maxY = Long.MAX_VALUE;
+         for (int[] r : group) {
+             if (r == null || r.length != 4 || r[2] <= 0 || r[3] <= 0) return new int[]{0, 0};
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -121,8 +121,8 @@
+     private HashMap<String, JSONObject> undoEdit;
+     private LinearLayout editorBar;
+     private TextView editorStatus;
+-    private Button faceGroupButton;
+-    private boolean faceGroupMove;
++    private Button faceGroupButton, shoulderGroupButton;
++    private boolean faceGroupMove, shoulderGroupMove;
+     private int[][] faceResizeOrigin;
+     private Runnable editorFinished;
+ 
+@@ -417,6 +417,46 @@
+         }
+         return true;
+     }
++    private static int shoulderSide(VirtualControllerElement e) {
++        if (e.elementId == VirtualControllerElement.EID_LT || e.elementId == VirtualControllerElement.EID_LB) return -1;
++        if (e.elementId == VirtualControllerElement.EID_RT || e.elementId == VirtualControllerElement.EID_RB) return 1;
++        return 0;
++    }
++    boolean shoulderGroupSelected(VirtualControllerElement e) {
++        return shoulderGroupMove && currentMode == ControllerMode.MoveButtons && shoulderSide(e) != 0;
++    }
++    private void updateShoulderGroupButton() {
++        if (shoulderGroupButton != null) shoulderGroupButton.setText(shoulderGroupMove ? R.string.nxb_shoulder_group_on : R.string.nxb_shoulder_group_off);
++    }
++    /** Move only the selected side's two shoulder buttons, preserving their gap. */
++    boolean moveShoulderGroup(VirtualControllerElement selected, int dx, int dy) {
++        if (!shoulderGroupSelected(selected)) return false;
++        int side = shoulderSide(selected);
++        java.util.ArrayList<VirtualControllerElement> members = new java.util.ArrayList<>();
++        java.util.ArrayList<int[]> obstacles = new java.util.ArrayList<>();
++        for (VirtualControllerElement e : elements) {
++            if (!e.isControlEnabled()) continue;
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++            if (shoulderSide(e) == side) members.add(e);
++            else if (!(e instanceof AnalogStick && ((AnalogStick)e).isFloating()))
++                obstacles.add(new int[]{p.leftMargin, p.topMargin, p.width, p.height});
++        }
++        if (members.size() != 2) return true;
++        int[][] group = new int[2][];
++        for (int i = 0; i < 2; i++) {
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)members.get(i).getLayoutParams();
++            group[i] = new int[]{p.leftMargin, p.topMargin, p.width, p.height};
++        }
++        LayoutSafeArea safe = safeArea(); int gear = (int)(layoutHeight() * 0.06f);
++        obstacles.add(new int[]{safe.left + 15, safe.top + 15, gear, gear});
++        int[] delta = FaceGroupMovement.clamp(group, obstacles.toArray(new int[0][]),
++                safe.left, safe.top, safe.right, safe.bottom, dx, dy);
++        for (VirtualControllerElement e : members) {
++            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams)e.getLayoutParams();
++            p.leftMargin += delta[0]; p.topMargin += delta[1]; e.requestLayout();
++        }
++        return true;
++    }
+     private java.util.ArrayList<VirtualControllerElement> faceMembers() {
+         java.util.ArrayList<VirtualControllerElement> members = new java.util.ArrayList<>();
+         for (VirtualControllerElement e : elements) if (e.isControlEnabled() && isFaceButton(e)) members.add(e);
+@@ -472,6 +512,7 @@
+                 element.elementId == VirtualControllerElement.EID_RS ? context.getString(R.string.nxb_layout_right_stick) :
+                 context.getString(R.string.nxb_layout_dpad);
+         if (faceGroupSelected(element)) name = context.getString(R.string.nxb_face_group_name);
++        else if (shoulderGroupSelected(element)) name = context.getString(shoulderSide(element) < 0 ? R.string.nxb_shoulder_group_left : R.string.nxb_shoulder_group_right);
+         if (editorStatus != null) editorStatus.setText(name + " · " + element.getWidth() + "×" + element.getHeight() + " · " + context.getString(R.string.nxb_layout_unsaved));
+     }
+     private void undoEdit() {
+@@ -606,6 +647,18 @@
+             });
+             row.addView(faceGroupButton);
+         }
++        boolean hasShoulders = false;
++        for (VirtualControllerElement e : elements) if (shoulderSide(e) != 0) { hasShoulders = true; break; }
++        if (hasShoulders) {
++            shoulderGroupMove = false;
++            shoulderGroupButton = new Button(context); shoulderGroupButton.setAllCaps(false); updateShoulderGroupButton();
++            shoulderGroupButton.setOnClickListener(v -> {
++                if (saving) return;
++                shoulderGroupMove = !shoulderGroupMove;
++                setEditMode(ControllerMode.MoveButtons); updateShoulderGroupButton(); invalidateElements();
++            });
++            row.addView(shoulderGroupButton);
++        }
+         addEditorButton(row, R.string.nxb_layout_size, () -> setEditMode(ControllerMode.ResizeButtons));
+         addEditorButton(row, R.string.nxb_layout_curve, this::editCurves);
+         addEditorButton(row, R.string.nxb_layout_haptic, this::editHaptics);
+@@ -640,7 +693,10 @@
+     private void setEditMode(ControllerMode mode) {
+         if (!isEditing() || saving) return;
+         releaseAll(); currentMode = mode;
+-        if (mode == ControllerMode.TestButtons) { faceGroupMove = false; updateFaceGroupButton(); }
++        if (mode == ControllerMode.TestButtons) {
++            faceGroupMove = false; shoulderGroupMove = false;
++            updateFaceGroupButton(); updateShoulderGroupButton();
++        }
+         faceResizeOrigin = null;
+         editorStatus.setText(mode == ControllerMode.TestButtons ? context.getString(R.string.nxb_layout_test_hint) : context.getString(R.string.nxb_layout_unsaved));
+         invalidateElements();
+@@ -924,7 +980,7 @@
+         currentMode = ControllerMode.Active;
+         if (editorBar != null) frame_layout.removeView(editorBar);
+         if (safeAreaOutline != null) { frame_layout.removeView(safeAreaOutline); safeAreaOutline = null; }
+-        editorBar = null; faceGroupButton = null; faceGroupMove = false; faceResizeOrigin = null; beforeEdit = null; undoEdit = null;
++        editorBar = null; faceGroupButton = null; shoulderGroupButton = null; faceGroupMove = false; shoulderGroupMove = false; faceResizeOrigin = null; beforeEdit = null; undoEdit = null;
+         buttonConfigure.setVisibility(View.VISIBLE); buttonConfigure.bringToFront();
+         if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
+         invalidateElements(); refreshElementVisibility();
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -110,7 +110,8 @@
+         int newPos_y = (int) getY() + y - pressed_y;
+ 
+         FrameLayout.LayoutParams layoutParams = (FrameLayout.LayoutParams) getLayoutParams();
+-        if (virtualController.moveFaceGroup(this, newPos_x - layoutParams.leftMargin, newPos_y - layoutParams.topMargin)) return;
++        if (virtualController.moveFaceGroup(this, newPos_x - layoutParams.leftMargin, newPos_y - layoutParams.topMargin) ||
++                virtualController.moveShoulderGroup(this, newPos_x - layoutParams.leftMargin, newPos_y - layoutParams.topMargin)) return;
+ 
+         LayoutSafeArea safe = virtualController.safeArea();
+         layoutParams.leftMargin = Math.max(safe.left, Math.min(newPos_x, safe.right - layoutParams.width));
+@@ -139,7 +140,7 @@
+     protected void onDraw(Canvas canvas) {
+         onElementDraw(canvas);
+ 
+-        if (currentMode != Mode.Normal || virtualController.faceGroupSelected(this)) {
++        if (currentMode != Mode.Normal || virtualController.faceGroupSelected(this) || virtualController.shoulderGroupSelected(this)) {
+             paint.setColor(configSelectedColor);
+             paint.setStrokeWidth(getDefaultStrokeWidth());
+             paint.setStyle(Paint.Style.STROKE);
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -404,4 +404,8 @@
+     <string name="nxb_recovery_export_number">Backup %1$d (newest first)</string>
+     <string name="nxb_recovery_export_explain">Exports the original damaged file without repairing it. It may contain game identifiers or other private information. Choose a trusted location.</string>
+     <string name="nxb_recovery_export_done">Damaged layout backup exported.</string>
++    <string name="nxb_shoulder_group_off">Shoulder pairs: off</string>
++    <string name="nxb_shoulder_group_on">Shoulder pairs: on</string>
++    <string name="nxb_shoulder_group_left">Left shoulder pair</string>
++    <string name="nxb_shoulder_group_right">Right shoulder pair</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -385,4 +385,8 @@
+     <string name="nxb_recovery_export_number">备份 %1$d（最新在前）</string>
+     <string name="nxb_recovery_export_explain">原样导出损坏文件，不会修复它。文件可能含有游戏标识或其他隐私信息，请选择可信位置。</string>
+     <string name="nxb_recovery_export_done">损坏布局备份已导出。</string>
++    <string name="nxb_shoulder_group_off">肩键联动：关</string>
++    <string name="nxb_shoulder_group_on">肩键联动：开</string>
++    <string name="nxb_shoulder_group_left">左肩键组</string>
++    <string name="nxb_shoulder_group_right">右肩键组</string>
+ </resources>

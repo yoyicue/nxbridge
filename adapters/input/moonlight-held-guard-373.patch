@@ -1,0 +1,82 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 372
++        versionCode = 373
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -53,6 +53,8 @@
+ 
+ import java.lang.reflect.InvocationTargetException;
+ import java.util.Map;
++import java.util.HashSet;
++import java.util.Iterator;
+ 
+ public class ControllerHandler implements InputManager.InputDeviceListener, UsbDriverListener {
+ 
+@@ -243,6 +245,8 @@
+ 
+     @Override
+     public synchronized void onInputDeviceRemoved(int deviceId) {
++        nxbForgetPhysicalDevice(nxbHeldPhysicalKeys, deviceId);
++        nxbForgetPhysicalDevice(nxbBlockedPhysicalKeys, deviceId);
+         InputDeviceContext context = inputDeviceContexts.get(deviceId);
+         if (context != null) {
+             LimeLog.info("Removed controller: "+context.name+" ("+deviceId+")");
+@@ -1215,6 +1219,16 @@
+ 
+     private volatile boolean nxbInputSuppressed;
+     private boolean nxbLayoutSuppressed, nxbLifecycleSuppressed;
++    private final HashSet<Long> nxbHeldPhysicalKeys = new HashSet<>();
++    private final HashSet<Long> nxbBlockedPhysicalKeys = new HashSet<>();
++    private static void nxbForgetPhysicalDevice(HashSet<Long> keys, int deviceId) {
++        for (Iterator<Long> it = keys.iterator(); it.hasNext();) {
++            if ((int)(it.next() >>> 32) == deviceId) it.remove();
++        }
++    }
++    private static long nxbPhysicalKey(KeyEvent event) {
++        return ((long)event.getDeviceId() << 32) | (event.getKeyCode() & 0xffffffffL);
++    }
+     private volatile boolean nxbAwaitingNeutral;
+ 
+     private boolean nxbNeutral(GenericControllerContext c) {
+@@ -1273,6 +1287,7 @@
+         boolean suppress = nxbLayoutSuppressed || nxbLifecycleSuppressed;
+         if (suppress == nxbInputSuppressed) return;
+         if (suppress) {
++            nxbBlockedPhysicalKeys.addAll(nxbHeldPhysicalKeys);
+             nxbInputSuppressed = true;
+             nxbAwaitingNeutral = true;
+             short mask = getActiveControllerMask();
+@@ -2459,6 +2474,13 @@
+     }
+ 
+     public synchronized boolean handleButtonUp(KeyEvent event) {
++        // Android can synthesize a cancelled UP when focus changes. It does
++        // not prove the physical button was released, so retain the barrier.
++        if (!event.isCanceled()) {
++            long key = nxbPhysicalKey(event);
++            nxbHeldPhysicalKeys.remove(key);
++            nxbBlockedPhysicalKeys.remove(key);
++        }
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;
+@@ -2699,7 +2721,10 @@
+         // A repeated DOWN is not a new physical press. In particular, Android
+         // can deliver repeats for a button held while the stream lost focus.
+         // Do not let that old hold reclaim control after lifecycle neutralization.
+-        if (event.getRepeatCount() != 0) return true;
++        long key = nxbPhysicalKey(event);
++        if (nxbBlockedPhysicalKeys.contains(key) || event.getRepeatCount() != 0) return true;
++        nxbHeldPhysicalKeys.add(key);
++        if (nxbInputSuppressed) nxbBlockedPhysicalKeys.add(key);
+         InputDeviceContext context = getContextForEvent(event);
+         if (context == null) {
+             return true;

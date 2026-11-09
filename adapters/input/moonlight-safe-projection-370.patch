@@ -1,0 +1,217 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 369
++        versionCode = 370
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -33,12 +33,16 @@
+     private final String identity;
+     private final AtomicFile file;
+     private final int width, height, minTarget;
++    private final LayoutSafeArea safe;
+ 
+-    LayoutProfileStore(Context context, String identity, int width, int height) {
++    LayoutProfileStore(Context context, String identity, int width, int height, LayoutSafeArea safe) {
+         if (identity == null || identity.isEmpty() || width <= 0 || height <= 0) throw new IllegalArgumentException("invalid layout identity or display");
+         this.identity = identity;
+         this.width = width;
+         this.height = height;
++        if (safe == null || safe.left < 0 || safe.top < 0 || safe.right > width || safe.bottom > height)
++            throw new IllegalArgumentException("invalid safe area");
++        this.safe = safe;
+         this.minTarget = Math.max(1, (int)Math.ceil(48 * context.getResources().getDisplayMetrics().density));
+         try {
+             byte[] digest = MessageDigest.getInstance("SHA-256").digest(identity.getBytes(StandardCharsets.UTF_8));
+@@ -65,15 +69,15 @@
+             if (element.isOptionalControl() && !element.isControlEnabled()) continue;
+             FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) element.getLayoutParams();
+             boolean zone = key.endsWith("_float");
+-            if (!element.virtualController.safeArea().contains(p.leftMargin, p.topMargin, p.width, p.height) || p.leftMargin < 0 || p.topMargin < 0 || p.width <= 0 || p.height <= 0 ||
++            if (!safe.contains(p.leftMargin, p.topMargin, p.width, p.height) || p.leftMargin < 0 || p.topMargin < 0 || p.width <= 0 || p.height <= 0 ||
+                 p.leftMargin + (long)p.width > width || p.topMargin + (long)p.height > height ||
+                 (!zone && (p.width < minTarget || p.height < minTarget))) throw new IOException("control outside safe area or too small");
+-            LayoutSafeArea safe = element.virtualController.safeArea();
+             int gear = (int)(height * 0.06f);
+             if (!zone && LayoutGeometry.overlaps(p.leftMargin, p.topMargin, p.width, p.height, safe.left + 15, safe.top + 15, gear, gear)) throw new IOException("control overlaps settings");
+             JSONObject item = new JSONObject();
+-            item.put("id", key); item.put("x", p.leftMargin / (double)width); item.put("y", p.topMargin / (double)height);
+-            item.put("w", p.width / (double)width); item.put("h", p.height / (double)height);
++            double[] v = LayoutProjection.encode(safe, zone, p.leftMargin, p.topMargin, p.width, p.height);
++            item.put("id", key); item.put("x", v[0]); item.put("y", v[1]);
++            item.put("w", v[2]); item.put("h", v[3]);
+             if (zone) {
+                 float[] curve = ((AnalogStick)element).getCurve();
+                 JSONObject c = new JSONObject(); c.put("d", curve[0]); c.put("s", curve[1]); c.put("e", curve[2]); c.put("gesture", ((AnalogStick)element).gestureEnabled());
+@@ -81,7 +85,7 @@
+             }
+             controls.put(item);
+         }
+-        JSONObject doc = new JSONObject(); doc.put("schema", 1); doc.put("identity", identity); doc.put("controls", controls); doc.put("revision", 1); doc.put("haptic", hapticEnabled); doc.put("fade", idleFade); doc.put("contrast", highContrast);
++        JSONObject doc = new JSONObject(); doc.put("schema", 2); doc.put("identity", identity); doc.put("controls", controls); doc.put("revision", 1); doc.put("haptic", hapticEnabled); doc.put("fade", idleFade); doc.put("contrast", highContrast);
+         validate(doc, elements);
+         return doc;
+     }
+@@ -112,7 +116,7 @@
+     }
+ 
+     private HashMap<String, JSONObject> validate(JSONObject doc, List<VirtualControllerElement> elements) throws JSONException, IOException {
+-        if ((doc.length() != 4 && doc.length() != 5 && doc.length() != 7) || (doc.length() >= 5 && !(doc.opt("haptic") instanceof Boolean)) || (doc.length() == 7 && (!(doc.opt("fade") instanceof Boolean) || !(doc.opt("contrast") instanceof Boolean))) || !StrictLayoutJson.isInteger(doc.opt("schema")) || doc.getLong("schema") != 1 || !(doc.opt("identity") instanceof String) || !identity.equals(doc.getString("identity")) || !StrictLayoutJson.isInteger(doc.opt("revision")) || doc.getLong("revision") < 1) throw new IOException("invalid profile header");
++        if ((doc.length() != 4 && doc.length() != 5 && doc.length() != 7) || (doc.length() >= 5 && !(doc.opt("haptic") instanceof Boolean)) || (doc.length() == 7 && (!(doc.opt("fade") instanceof Boolean) || !(doc.opt("contrast") instanceof Boolean))) || !StrictLayoutJson.isInteger(doc.opt("schema")) || (doc.getLong("schema") != 1 && doc.getLong("schema") != 2) || !(doc.opt("identity") instanceof String) || !identity.equals(doc.getString("identity")) || !StrictLayoutJson.isInteger(doc.opt("revision")) || doc.getLong("revision") < 1) throw new IOException("invalid profile header");
+         JSONArray controls = doc.getJSONArray("controls");
+         if (controls.length() > elements.size() || controls.length() == 0 || controls.length() > 32) throw new IOException("unexpected controls");
+         HashMap<String, JSONObject> found = new HashMap<>();
+@@ -129,11 +133,9 @@
+                 if ((curve.length() != 3 && curve.length() != 4) || (curve.length() == 4 && !(curve.opt("gesture") instanceof Boolean)) ||
+                     !StrictLayoutJson.isNumber(curve.opt("d")) || !StrictLayoutJson.isNumber(curve.opt("s")) || !StrictLayoutJson.isNumber(curve.opt("e")) || !FloatingStickMath.validCurve((float)curve.getDouble("d"), (float)curve.getDouble("s"), (float)curve.getDouble("e"))) throw new IOException("invalid curve");
+             }
+-            double x=item.getDouble("x"), y=item.getDouble("y"), w=item.getDouble("w"), h=item.getDouble("h");
+-            if (Double.isNaN(x) || Double.isInfinite(x) || Double.isNaN(y) || Double.isInfinite(y) || Double.isNaN(w) || Double.isInfinite(w) || Double.isNaN(h) || Double.isInfinite(h) ||
+-                x < 0 || y < 0 || w <= 0 || h <= 0 || x+w > 1.000001 || y+h > 1.000001 ||
+-                (!id.endsWith("_float") && (w*width < minTarget || h*height < minTarget)) ||
+-                Math.round(x*width) + Math.round(w*width) > width || Math.round(y*height) + Math.round(h*height) > height) throw new IOException("invalid control bounds");
++            int[] box = projected(doc, item, true);
++            if (!id.endsWith("_float") && (box[2] < minTarget || box[3] < minTarget))
++                throw new IOException("control too small after projection");
+         }
+         Set<String> expected = new HashSet<>();
+         for (VirtualControllerElement element : elements) {
+@@ -141,32 +143,38 @@
+             if (!element.isOptionalControl() && !found.containsKey(key(element))) throw new IOException("missing control");
+         }
+         for (String id : found.keySet()) if (!expected.contains(id)) throw new IOException("unexpected control");
+-        // Check the projected pixel rectangles used by applyDocument, on every
+-        // path (capture, load, history and save). Floating zones are allowed
+-        // below buttons, but neither ordinary targets nor settings may overlap.
++        // Validate final projected and clamped pixels, including the actual safe-area gear position.
+         for (int i = 0; i < controls.length(); i++) {
+             JSONObject a = controls.getJSONObject(i); if (a.getString("id").endsWith("_float")) continue;
+-            int ax = (int)Math.round(a.getDouble("x") * width), ay = (int)Math.round(a.getDouble("y") * height);
+-            int aw = (int)Math.round(a.getDouble("w") * width), ah = (int)Math.round(a.getDouble("h") * height);
++            int[] ar = projected(doc, a, true);
+             int gear = (int)(height * 0.06f);
+-            if (LayoutGeometry.overlaps(ax, ay, aw, ah, 15, 15, gear, gear)) throw new IOException("control overlaps settings");
++            if (LayoutGeometry.overlaps(ar[0], ar[1], ar[2], ar[3], safe.left + 15, safe.top + 15, gear, gear))
++                throw new IOException("control overlaps settings");
+             for (int j = i + 1; j < controls.length(); j++) {
+                 JSONObject b = controls.getJSONObject(j); if (b.getString("id").endsWith("_float")) continue;
+-                int bx = (int)Math.round(b.getDouble("x") * width), by = (int)Math.round(b.getDouble("y") * height);
+-                int bw = (int)Math.round(b.getDouble("w") * width), bh = (int)Math.round(b.getDouble("h") * height);
+-                if (LayoutGeometry.overlaps(ax, ay, aw, ah, bx, by, bw, bh)) throw new IOException("overlapping controls");
++                int[] br = projected(doc, b, true);
++                if (LayoutGeometry.overlaps(ar[0], ar[1], ar[2], ar[3], br[0], br[1], br[2], br[3]))
++                    throw new IOException("overlapping controls");
+             }
+         }
+         JSONObject left = found.get("12_float"), right = found.get("13_float");
+-        if (left != null && right != null && LayoutGeometry.overlaps(
+-                (int)Math.round(left.getDouble("x") * width), (int)Math.round(left.getDouble("y") * height),
+-                (int)Math.round(left.getDouble("w") * width), (int)Math.round(left.getDouble("h") * height),
+-                (int)Math.round(right.getDouble("x") * width), (int)Math.round(right.getDouble("y") * height),
+-                (int)Math.round(right.getDouble("w") * width), (int)Math.round(right.getDouble("h") * height)))
+-            throw new IOException("overlapping stick areas");
++        if (left != null && right != null) {
++            int[] l = projected(doc, left, true), r = projected(doc, right, true);
++            if (LayoutGeometry.overlaps(l[0], l[1], l[2], l[3], r[0], r[1], r[2], r[3]))
++                throw new IOException("overlapping stick areas");
++        }
+         return found;
+     }
+ 
++    private int[] projected(JSONObject doc, JSONObject item, boolean clamp) throws IOException, JSONException {
++        try {
++            int[] r = LayoutProjection.project((int)doc.getLong("schema"), safe, width, height,
++                    item.getString("id").endsWith("_float"), item.getDouble("x"), item.getDouble("y"),
++                    item.getDouble("w"), item.getDouble("h"));
++            return clamp ? safe.constrain(r[0], r[1], r[2], r[3]) : r;
++        } catch (IllegalArgumentException invalid) { throw new IOException("invalid projected geometry", invalid); }
++    }
++
+     long load(List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
+         synchronized (LOCK) {
+             try {
+@@ -241,8 +249,9 @@
+                 if (item == null && element.isOptionalControl()) { element.setControlEnabled(false); continue; }
+                 JSONObject geometry = new JSONObject();
+                 if (element.isOptionalControl()) geometry.put("ENABLED", true);
+-                geometry.put("LEFT", (int)Math.round(item.getDouble("x")*width)); geometry.put("TOP", (int)Math.round(item.getDouble("y")*height));
+-                geometry.put("WIDTH", (int)Math.round(item.getDouble("w")*width)); geometry.put("HEIGHT", (int)Math.round(item.getDouble("h")*height));
++                int[] bounds = projected(doc, item, false);
++                geometry.put("LEFT", bounds[0]); geometry.put("TOP", bounds[1]);
++                geometry.put("WIDTH", bounds[2]); geometry.put("HEIGHT", bounds[3]);
+                 if (item.has("curve")) {
+                     JSONObject curve = item.getJSONObject("curve");
+                     geometry.put("DEADZONE", curve.getDouble("d")); geometry.put("SATURATION", curve.getDouble("s")); geometry.put("EXPONENT", curve.getDouble("e")); geometry.put("GESTURE", curve.optBoolean("gesture", true));
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -272,7 +272,7 @@
+             int orientation = context.getResources().getConfiguration().orientation;
+             PreferenceConfiguration config = PreferenceConfiguration.readPreferences(context);
+             String identity = LayoutIdentity.key(libraryGameId, serverUuid, appId, orientation, floating, config.onlyL3R3, config.showGuideButton);
+-            profileStore = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight());
++            profileStore = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight(), safeArea());
+             profileRevision = profileStore.load(elements, this);
+             boolean adjusted = constrainElementsToSafeArea();
+             if (profileRevision > 0) {
+@@ -603,7 +603,7 @@
+                 boolean floating = PreferenceManager.getDefaultSharedPreferences(context).getBoolean("checkbox_floating_sticks", true);
+                 PreferenceConfiguration config = PreferenceConfiguration.readPreferences(context);
+                 String identity = LayoutIdentity.key(null, serverUuid, appId, context.getResources().getConfiguration().orientation, floating, config.onlyL3R3, config.showGuideButton);
+-                LayoutProfileStore legacy = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight());
++                LayoutProfileStore legacy = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight(), safeArea());
+                 if (legacy.load(elements, this) == 0) { Toast.makeText(context, R.string.nxb_import_missing, Toast.LENGTH_SHORT).show(); return; }
+             }
+             profileStore.capture(elements, localHaptics, idleFade, highContrast);
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProjection.java
+@@ -0,0 +1,44 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Versioned layout geometry, projected to the current visible safe area. */
++public final class LayoutProjection {
++    private LayoutProjection() { }
++    private static boolean invalid(double value) { return Double.isNaN(value) || Double.isInfinite(value); }
++
++    /** Schema 2: ordinary controls use safe-area centers and short-side sizes;
++     * floating-stick activation zones use a safe-area-relative rectangle. */
++    public static double[] encode(LayoutSafeArea safe, boolean zone, int x, int y, int w, int h) {
++        if (!safe.contains(x, y, w, h)) throw new IllegalArgumentException("outside safe area");
++        double sw = safe.right - (double)safe.left, sh = safe.bottom - (double)safe.top;
++        double shortSide = Math.min(sw, sh);
++        if (zone) return new double[]{(x-safe.left)/sw, (y-safe.top)/sh, w/sw, h/sh};
++        return new double[]{(x + w/2.0 - safe.left)/sw, (y + h/2.0 - safe.top)/sh, w/shortSide, h/shortSide};
++    }
++
++    /** Returns raw projected pixels; caller clamps and validates their final intersections. */
++    public static int[] project(int schema, LayoutSafeArea safe, int width, int height,
++                                boolean zone, double x, double y, double w, double h) {
++        if (width <= 0 || height <= 0 || invalid(x) || invalid(y) || invalid(w) || invalid(h) || x < 0 || y < 0 || x > 1 || y > 1 || w <= 0 || h <= 0)
++            throw new IllegalArgumentException("invalid layout coordinates");
++        double sw = safe.right - (double)safe.left, sh = safe.bottom - (double)safe.top;
++        double px, py, pw, ph;
++        if (schema == 1) {
++            if (x+w > 1.000001 || y+h > 1.000001) throw new IllegalArgumentException("legacy bounds");
++            px = x*width; py = y*height; pw = w*width; ph = h*height;
++        } else if (schema == 2 && zone) {
++            if (x+w > 1.000001 || y+h > 1.000001) throw new IllegalArgumentException("zone bounds");
++            px = safe.left + x*sw; py = safe.top + y*sh; pw = w*sw; ph = h*sh;
++        } else if (schema == 2) {
++            double side = Math.min(sw, sh);
++            pw = w*side; ph = h*side;
++            if (invalid(pw) || invalid(ph) || pw > sw + .000001 || ph > sh + .000001)
++                throw new IllegalArgumentException("control exceeds safe area");
++            px = safe.left + x*sw - pw/2.0; py = safe.top + y*sh - ph/2.0;
++        } else throw new IllegalArgumentException("unknown schema");
++        long l = Math.round(px), t = Math.round(py), rw = Math.round(pw), rh = Math.round(ph);
++        if (l < Integer.MIN_VALUE || l > Integer.MAX_VALUE || t < Integer.MIN_VALUE || t > Integer.MAX_VALUE ||
++            rw <= 0 || rh <= 0 || rw > Integer.MAX_VALUE || rh > Integer.MAX_VALUE)
++            throw new IllegalArgumentException("invalid projected bounds");
++        return new int[]{(int)l, (int)t, (int)rw, (int)rh};
++    }
++}

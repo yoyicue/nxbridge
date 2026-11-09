@@ -1,0 +1,100 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 381
++        versionCode = 382
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
+@@ -159,6 +159,7 @@
+ 
+     private final Paint paint = new Paint();
+     private final boolean floating;
++    private final StickEdgeFeedback edgeFeedback = new StickEdgeFeedback();
+     private float floatingOriginX, floatingOriginY, floatingX, floatingY;
+     private float floatingRadius;
+ 
+@@ -351,6 +352,7 @@
+     private boolean onFloatingTouch(MotionEvent event) {
+         switch (event.getActionMasked()) {
+             case MotionEvent.ACTION_DOWN:
++                edgeFeedback.reset();
+                 floatingOriginX = floatingX = event.getX();
+                 floatingOriginY = floatingY = event.getY();
+                 if (gestureEnabled && floatingPendingTap && event.getEventTime() - timeLastClick <= timeoutDoubleClick) {
+@@ -373,11 +375,14 @@
+                             event.getY() - floatingOriginY, floatingRadius, curveDeadzone, curveSaturation, curveExponent);
+                     floatingX = floatingOriginX + xy[0] * floatingRadius;
+                     floatingY = floatingOriginY - xy[1] * floatingRadius;
++                    if (edgeFeedback.onMove(virtualController.localHapticsEnabled(), xy[0], xy[1]))
++                        performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+                     notifyOnMovement(xy[0], xy[1]);
+                 }
+                 break;
+             case MotionEvent.ACTION_CANCEL:
+             case MotionEvent.ACTION_UP:
++                edgeFeedback.reset();
+                 if (isPressed()) {
+                     floatingPendingTap = event.getActionMasked() == MotionEvent.ACTION_UP && gestureEnabled &&
+                             click_state == CLICK_STATE.SINGLE && floatingTapCandidate &&
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -645,10 +645,18 @@
+         final VirtualControllerElement l3 = leftClick, r3 = rightClick;
+         boolean extras = l3 != null && r3 != null;
+         final boolean[] options = extras ? new boolean[]{localHaptics, idleFade, highContrast, l3.isControlEnabled(), r3.isControlEnabled()} : new boolean[]{localHaptics, idleFade, highContrast};
+-        String[] labels = extras ? new String[]{context.getString(R.string.nxb_haptic_on), context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_button_l3), context.getString(R.string.nxb_button_r3)} :
+-                new String[]{context.getString(R.string.nxb_haptic_on), context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast)};
++        android.os.Vibrator deviceVibrator = (android.os.Vibrator)context.getSystemService(Context.VIBRATOR_SERVICE);
++        final boolean hasHapticDevice = deviceVibrator != null && deviceVibrator.hasVibrator();
++        String hapticLabel = context.getString(hasHapticDevice ? R.string.nxb_haptic_on : R.string.nxb_haptic_unavailable);
++        String[] labels = extras ? new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_button_l3), context.getString(R.string.nxb_button_r3)} :
++                new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast)};
+         new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_haptic)
+-                .setMultiChoiceItems(labels, options, (dialog, which, checked) -> options[which] = checked)
++                .setMultiChoiceItems(labels, options, (dialog, which, checked) -> {
++                    if (which == 0 && !hasHapticDevice) {
++                        ((AlertDialog)dialog).getListView().setItemChecked(0, options[0]);
++                        Toast.makeText(context, R.string.nxb_haptic_unavailable, Toast.LENGTH_SHORT).show();
++                    } else options[which] = checked;
++                })
+                 .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                     try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
+                     releaseAll(); setVisualOptions(options[0], options[1], options[2]);
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -398,4 +398,5 @@
+     <string name="nxb_stick_visual">Visual size (%)</string>
+     <string name="nxb_stick_left_example">Left stick area · example</string>
+     <string name="nxb_stick_right_example">Right stick area · example</string>
++    <string name="nxb_haptic_unavailable">Local touch feedback · No vibrator on this device</string>
+ </resources>
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -379,4 +379,5 @@
+     <string name="nxb_stick_visual">显示大小（%）</string>
+     <string name="nxb_stick_left_example">左摇杆区域 · 圆圈为示意</string>
+     <string name="nxb_stick_right_example">右摇杆区域 · 圆圈为示意</string>
++    <string name="nxb_haptic_unavailable">轻触反馈 · 本机没有振动器</string>
+ </resources>
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/StickEdgeFeedback.java
+@@ -0,0 +1,13 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** At most one local feedback request per touch, when the stick reaches full output. */
++public final class StickEdgeFeedback {
++    private boolean fired;
++    public void reset() { fired = false; }
++    public boolean onMove(boolean enabled, float x, float y) {
++        if (fired || !enabled || Float.isNaN(x) || Float.isNaN(y) || Float.isInfinite(x) || Float.isInfinite(y)) return false;
++        if (Math.hypot(x, y) < 0.999) return false;
++        fired = true;
++        return true;
++    }
++}

@@ -1,0 +1,38 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 382
++        versionCode = 383
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -647,19 +647,22 @@
+         final boolean[] options = extras ? new boolean[]{localHaptics, idleFade, highContrast, l3.isControlEnabled(), r3.isControlEnabled()} : new boolean[]{localHaptics, idleFade, highContrast};
+         android.os.Vibrator deviceVibrator = (android.os.Vibrator)context.getSystemService(Context.VIBRATOR_SERVICE);
+         final boolean hasHapticDevice = deviceVibrator != null && deviceVibrator.hasVibrator();
++        final boolean previousHaptic = localHaptics;
+         String hapticLabel = context.getString(hasHapticDevice ? R.string.nxb_haptic_on : R.string.nxb_haptic_unavailable);
+         String[] labels = extras ? new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_button_l3), context.getString(R.string.nxb_button_r3)} :
+                 new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast)};
+         new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_haptic)
+                 .setMultiChoiceItems(labels, options, (dialog, which, checked) -> {
+                     if (which == 0 && !hasHapticDevice) {
+-                        ((AlertDialog)dialog).getListView().setItemChecked(0, options[0]);
++                        options[0] = previousHaptic;
++                        android.widget.ListView list = ((AlertDialog)dialog).getListView();
++                        list.post(() -> list.setItemChecked(0, previousHaptic));
+                         Toast.makeText(context, R.string.nxb_haptic_unavailable, Toast.LENGTH_SHORT).show();
+                     } else options[which] = checked;
+                 })
+                 .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                     try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
+-                    releaseAll(); setVisualOptions(options[0], options[1], options[2]);
++                    releaseAll(); setVisualOptions(hasHapticDevice ? options[0] : previousHaptic, options[1], options[2]);
+                     if (l3 != null && r3 != null) { l3.setControlEnabled(options[3]); r3.setControlEnabled(options[4]); }
+                     invalidateElements();
+                 }).setNegativeButton(android.R.string.cancel, null).show();

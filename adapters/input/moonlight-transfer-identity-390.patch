@@ -1,0 +1,150 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 389
++        versionCode = 390
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/LayoutEditorActivity.java b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+--- a/app/src/main/java/com/limelight/LayoutEditorActivity.java
++++ b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+@@ -25,7 +25,7 @@
+     private static final int IMPORT = 1, EXPORT = 2, EXPORT_BACKUP = 3;
+     private int pendingMode;
+     private byte[] pendingDraft, pendingFingerprint, pendingBackupFingerprint;
+-    private String pendingBackupName;
++    private String pendingBackupName, pendingIdentity;
+     private boolean preparingBackup;
+     private long pendingRevision;
+     private Intent deferredResult;
+@@ -39,6 +39,7 @@
+             pendingDraft = state.getByteArray("nxb_transfer_draft");
+             pendingFingerprint = state.getByteArray("nxb_transfer_fingerprint");
+             pendingRevision = state.getLong("nxb_transfer_revision", 0);
++            pendingIdentity = state.getString("nxb_transfer_identity");
+             pendingBackupName = state.getString("nxb_backup_name");
+             pendingBackupFingerprint = state.getByteArray("nxb_backup_fingerprint");
+             if (pendingMode == EXPORT_BACKUP && (pendingBackupName == null || pendingBackupFingerprint == null)) pendingMode = 0;
+@@ -62,7 +63,7 @@
+             controller.refreshLayout();
+             controller.show();
+             controller.beginEditing(this::finish);
+-            if (pendingMode != 0 && (!controller.portableBaseMatches(pendingRevision, pendingFingerprint) ||
++            if (pendingMode != 0 && (!controller.portableBaseMatches(pendingIdentity, pendingRevision, pendingFingerprint) ||
+                     !controller.restorePortableDraft(pendingDraft))) {
+                 pendingMode = 0; pendingDraft = null;
+                 Toast.makeText(this, R.string.nxb_portable_conflict, Toast.LENGTH_LONG).show();
+@@ -102,8 +103,8 @@
+     private void prepareRecoveryExport(String name) {
+         if (controller == null || !controller.isEditing() || pendingMode != 0 || preparingBackup) return;
+         final VirtualController selected = controller;
+-        final byte[] draft; final byte[] fingerprint; final long revision;
+-        try { draft = selected.capturePortableDraft(); fingerprint = selected.portableBaseFingerprint(); revision = selected.portableBaseRevision(); }
++        final byte[] draft; final byte[] fingerprint; final long revision; final String identity;
++        try { draft = selected.capturePortableDraft(); fingerprint = selected.portableBaseFingerprint(); revision = selected.portableBaseRevision(); identity = selected.portableBaseIdentity(); }
+         catch (Exception e) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); return; }
+         preparingBackup = true;
+         new Thread(() -> {
+@@ -114,9 +115,9 @@
+                 preparingBackup = false;
+                 if (!alive || isFinishing() || controller != selected) return;
+                 try {
+-                    if (result == null || pendingMode != 0 || !selected.portableBaseMatches(revision, fingerprint) || !Arrays.equals(draft, selected.capturePortableDraft()))
++                    if (result == null || pendingMode != 0 || !selected.portableBaseMatches(identity, revision, fingerprint) || !Arrays.equals(draft, selected.capturePortableDraft()))
+                         throw new java.io.IOException("editor changed");
+-                    pendingDraft = draft; pendingRevision = revision; pendingFingerprint = fingerprint;
++                    pendingDraft = draft; pendingRevision = revision; pendingFingerprint = fingerprint; pendingIdentity = identity;
+                     pendingBackupName = name; pendingBackupFingerprint = result; pendingMode = EXPORT_BACKUP;
+                     Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream");
+                     if (android.os.Build.VERSION.SDK_INT >= 26) intent.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+@@ -135,7 +136,7 @@
+         if (controller == null || !controller.isEditing() || pendingMode != 0) return;
+         try {
+             pendingDraft = controller.capturePortableDraft();
+-            pendingRevision = controller.portableBaseRevision(); pendingFingerprint = controller.portableBaseFingerprint();
++            pendingRevision = controller.portableBaseRevision(); pendingFingerprint = controller.portableBaseFingerprint(); pendingIdentity = controller.portableBaseIdentity();
+             pendingMode = export ? EXPORT : IMPORT;
+             Intent intent = new Intent(export ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT);
+             intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType(export ? "application/json" : "*/*");
+@@ -157,6 +158,7 @@
+         if (pendingMode != 0 && pendingDraft != null) {
+             state.putInt("nxb_transfer_mode", pendingMode); state.putByteArray("nxb_transfer_draft", pendingDraft);
+             state.putByteArray("nxb_transfer_fingerprint", pendingFingerprint); state.putLong("nxb_transfer_revision", pendingRevision);
++            state.putString("nxb_transfer_identity", pendingIdentity);
+             state.putString("nxb_backup_name", pendingBackupName); state.putByteArray("nxb_backup_fingerprint", pendingBackupFingerprint);
+         }
+         super.onSaveInstanceState(state);
+@@ -171,10 +173,13 @@
+ 
+     private void handlePortableResult(int result, Intent data) {
+         int mode = pendingMode; byte[] draft = pendingDraft, fingerprint = pendingFingerprint; long revision = pendingRevision;
+-        final String backupName = pendingBackupName; final byte[] backupHash = pendingBackupFingerprint;
++        final String backupName = pendingBackupName, identity = pendingIdentity; final byte[] backupHash = pendingBackupFingerprint;
+         final VirtualController selected = controller;
+-        pendingMode = 0; pendingDraft = null; pendingFingerprint = null; pendingBackupName = null; pendingBackupFingerprint = null;
++        pendingMode = 0; pendingDraft = null; pendingFingerprint = null; pendingIdentity = null; pendingBackupName = null; pendingBackupFingerprint = null;
+         if (mode == 0 || draft == null || result != RESULT_OK || data == null || data.getData() == null) return;
++        if (!controller.portableBaseMatches(identity, revision, fingerprint)) {
++            Toast.makeText(this, R.string.nxb_portable_conflict, Toast.LENGTH_LONG).show(); return;
++        }
+         Uri uri = data.getData();
+         if (!"content".equals(uri.getScheme())) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); return; }
+         new Thread(() -> {
+@@ -197,7 +202,7 @@
+                 if (!finished) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); return; }
+                 if (mode == EXPORT || mode == EXPORT_BACKUP) { Toast.makeText(this, mode == EXPORT ? R.string.nxb_portable_export_done : R.string.nxb_recovery_export_done, Toast.LENGTH_SHORT).show(); return; }
+                 try {
+-                    if (!controller.portableBaseMatches(revision, fingerprint) || !Arrays.equals(draft, controller.capturePortableDraft())) {
++                    if (!controller.portableBaseMatches(identity, revision, fingerprint) || !Arrays.equals(draft, controller.capturePortableDraft())) {
+                         Toast.makeText(this, R.string.nxb_portable_conflict, Toast.LENGTH_LONG).show(); return;
+                     }
+                     if (!controller.previewPortableDraft(received)) { Toast.makeText(this, R.string.nxb_portable_invalid, Toast.LENGTH_LONG).show(); return; }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutIdentity.java
+@@ -3,6 +3,12 @@
+ /** Names a device-local layout without depending on a mutable display title. */
+ public final class LayoutIdentity {
+     private LayoutIdentity() { }
++    /** Restored picker state must belong to the same layout, not merely the same revision. */
++    public static boolean sameTransferBase(String expectedIdentity, long expectedRevision, byte[] expectedFingerprint,
++                                           String currentIdentity, long currentRevision, byte[] currentFingerprint) {
++        return expectedIdentity != null && expectedIdentity.equals(currentIdentity) && expectedRevision == currentRevision &&
++                java.util.Arrays.equals(expectedFingerprint, currentFingerprint);
++    }
+     public static String key(String libraryId, String serverUuid, int appId, int orientation, boolean floating) {
+         return key(libraryId, serverUuid, appId, orientation, floating, false, false);
+     }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -57,6 +57,8 @@
+     String[] recoveryBackups() throws IOException { return LayoutRecoveryFiles.backupNames(file.getBaseFile()); }
+     byte[] recoveryBackupFingerprint(String name) throws IOException { return LayoutRecoveryFiles.backupFingerprint(file.getBaseFile(), name); }
+     byte[] readRecoveryBackup(String name, byte[] fingerprint) throws IOException { return LayoutRecoveryFiles.readBackupIfUnchanged(file.getBaseFile(), name, fingerprint); }
++
++    String transferIdentity() { return identity; }
+ 
+     private static String key(VirtualControllerElement element) {
+         return element.elementId + ((element instanceof AnalogStick && ((AnalogStick)element).isFloating()) ? "_float" : "");
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -525,8 +525,10 @@
+     public byte[] readRecoveryBackup(String name, byte[] fingerprint) throws java.io.IOException { return profileStore.readRecoveryBackup(name, fingerprint); }
+     public long portableBaseRevision() { return profileRevision; }
+     public byte[] portableBaseFingerprint() { return invalidProfileFingerprint == null ? null : invalidProfileFingerprint.clone(); }
+-    public boolean portableBaseMatches(long revision, byte[] fingerprint) {
+-        return isEditing() && !saving && profileRevision == revision && java.util.Arrays.equals(invalidProfileFingerprint, fingerprint);
++    public String portableBaseIdentity() { return profileStore == null ? null : profileStore.transferIdentity(); }
++    public boolean portableBaseMatches(String identity, long revision, byte[] fingerprint) {
++        return isEditing() && !saving && profileStore != null && LayoutIdentity.sameTransferBase(
++                identity, revision, fingerprint, profileStore.transferIdentity(), profileRevision, invalidProfileFingerprint);
+     }
+     public boolean previewPortableDraft(byte[] bytes) { return applyPortableDraft(bytes, false); }
+     public boolean restorePortableDraft(byte[] bytes) { return applyPortableDraft(bytes, true); }

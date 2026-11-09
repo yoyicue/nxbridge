@@ -1,0 +1,93 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 2cbaaf9..c6cd488 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 401
++        versionCode = 403
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/res/layout/app_grid_item.xml b/app/src/main/res/layout/app_grid_item.xml
+index 6c066bf..7e89b7b 100644
+--- a/app/src/main/res/layout/app_grid_item.xml
++++ b/app/src/main/res/layout/app_grid_item.xml
+@@ -1,12 +1,14 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:layout_width="150dp"
+-    android:layout_height="215dp"
++    android:layout_height="263dp"
+     android:padding="10dp">
+     <ImageView
+         android:id="@+id/grid_image"
++        android:layout_alignParentTop="true"
++        android:layout_above="@id/nxb_edit_layout"
+         android:cropToPadding="false"
+-        android:scaleType="centerCrop"
++        android:scaleType="fitCenter"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent">
+     </ImageView>
+@@ -19,6 +21,7 @@
+     </ImageView>
+     <TextView
+         android:id="@+id/grid_text"
++        android:layout_above="@id/nxb_edit_layout"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"
+         android:layout_below="@id/grid_overlay"
+@@ -29,7 +32,7 @@
+     <ImageButton android:id="@+id/nxb_edit_layout"
+         android:layout_width="48dp" android:layout_height="48dp"
+         android:layout_alignParentEnd="true" android:layout_alignParentBottom="true"
+-        android:background="#B01A3025" android:padding="12dp"
++        android:background="?android:attr/selectableItemBackgroundBorderless" android:padding="12dp"
+         android:focusable="false" android:focusableInTouchMode="false"
+-        android:src="@drawable/ic_settings" android:contentDescription="@string/nxb_layout_entry" />
++        android:scaleType="fitCenter" android:src="@drawable/ic_settings" android:contentDescription="@string/nxb_layout_entry" />
+ </RelativeLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/app_grid_item_small.xml b/app/src/main/res/layout/app_grid_item_small.xml
+index 9b2829a..958643d 100644
+--- a/app/src/main/res/layout/app_grid_item_small.xml
++++ b/app/src/main/res/layout/app_grid_item_small.xml
+@@ -1,12 +1,14 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:layout_width="100dp"
+-    android:layout_height="145dp"
++    android:layout_height="193dp"
+     android:padding="5dp">
+     <ImageView
+         android:id="@+id/grid_image"
++        android:layout_alignParentTop="true"
++        android:layout_above="@id/nxb_edit_layout"
+         android:cropToPadding="false"
+-        android:scaleType="centerCrop"
++        android:scaleType="fitCenter"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent">
+     </ImageView>
+@@ -19,6 +21,7 @@
+     </ImageView>
+     <TextView
+         android:id="@+id/grid_text"
++        android:layout_above="@id/nxb_edit_layout"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"
+         android:layout_below="@id/grid_overlay"
+@@ -29,7 +32,7 @@
+     <ImageButton android:id="@+id/nxb_edit_layout"
+         android:layout_width="48dp" android:layout_height="48dp"
+         android:layout_alignParentEnd="true" android:layout_alignParentBottom="true"
+-        android:background="#B01A3025" android:padding="12dp"
++        android:background="?android:attr/selectableItemBackgroundBorderless" android:padding="12dp"
+         android:focusable="false" android:focusableInTouchMode="false"
+-        android:src="@drawable/ic_settings" android:contentDescription="@string/nxb_layout_entry" />
++        android:scaleType="fitCenter" android:src="@drawable/ic_settings" android:contentDescription="@string/nxb_layout_entry" />
+ </RelativeLayout>
+\ No newline at end of file

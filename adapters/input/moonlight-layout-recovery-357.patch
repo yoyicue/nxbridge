@@ -1,0 +1,284 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index a3bc4b3c..81ec7fa0 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 356
++        versionCode = 357
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+index d69a37be..5328e3cc 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -17,6 +17,7 @@ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
++import java.util.TreeSet;
+ 
+ /** Private, versioned local profile; never deletes or modifies the old OSC preferences. */
+ final class LayoutProfileStore {
+@@ -25,6 +26,10 @@ final class LayoutProfileStore {
+     static final class RevisionConflict extends IOException {
+         RevisionConflict() { super("layout revision conflict"); }
+     }
++    static final class InvalidProfile extends IOException {
++        final byte[] fingerprint;
++        InvalidProfile(byte[] fingerprint, Exception cause) { super("invalid layout preserved", cause); this.fingerprint = fingerprint; }
++    }
+     private final String identity;
+     private final AtomicFile file;
+     private final int width, height, minTarget;
+@@ -144,9 +149,42 @@ final class LayoutProfileStore {
+ 
+     long load(List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
+         synchronized (LOCK) {
+-            JSONObject doc = readDocument(file); if (doc == null) return 0;
+-            applyDocument(doc, elements, controller);
+-            return doc.getLong("revision");
++            try {
++                JSONObject doc = readDocument(file); if (doc == null) return 0;
++                applyDocument(doc, elements, controller);
++                return doc.getLong("revision");
++            } catch (IOException | JSONException invalid) {
++                byte[] fingerprint;
++                try { fingerprint = LayoutRecoveryFiles.fingerprint(file.getBaseFile()); }
++                catch (IOException unavailable) { throw invalid; }
++                throw new InvalidProfile(fingerprint, invalid);
++            }
++        }
++    }
++
++    private TreeSet<Long> historyRevisions() throws IOException {
++        File base = file.getBaseFile(); String prefix = base.getName() + ".revision-";
++        String[] entries = base.getParentFile().list((dir, name) -> name.startsWith(prefix));
++        if (entries == null) throw new IOException("layout history unavailable");
++        TreeSet<Long> revisions = new TreeSet<>();
++        for (String name : entries) {
++            String suffix = name.substring(prefix.length());
++            if (!suffix.matches("[1-9][0-9]*")) continue;
++            try { revisions.add(Long.parseLong(suffix)); } catch (NumberFormatException ignored) { }
++        }
++        return revisions;
++    }
++
++    boolean previewLatestValidHistory(List<VirtualControllerElement> elements, VirtualController controller) throws IOException {
++        synchronized (LOCK) {
++            for (long revision : historyRevisions().descendingSet()) {
++                try {
++                    JSONObject old = readDocument(history(revision));
++                    if (old == null || old.getLong("revision") != revision) continue;
++                    applyDocument(old, elements, controller); return true;
++                } catch (IOException | JSONException invalid) { /* Keep and skip a damaged historical file. */ }
++            }
++            return false;
+         }
+     }
+ 
+@@ -227,4 +265,30 @@ final class LayoutProfileStore {
+             return current + 1;
+         }
+     }
++
++    long recoverAndSave(JSONObject draft, byte[] expected, List<VirtualControllerElement> elements,
++                        LayoutCommitGuard guard, long generation) throws IOException, JSONException {
++        synchronized (LOCK) {
++            // Restore any AtomicFile backup first, then preserve and compare exactly
++            // the invalid contents observed when this editor was opened.
++            try (FileInputStream ignored = file.openRead()) { }
++            TreeSet<Long> revisions = historyRevisions();
++            long last = revisions.isEmpty() ? 0 : revisions.last();
++            if (last == Long.MAX_VALUE) throw new IOException("layout revisions exhausted");
++            draft.put("revision", last + 1); validate(draft, elements);
++            byte[] data = draft.toString().getBytes(StandardCharsets.UTF_8);
++            if (data.length > MAX_BYTES) throw new IOException("layout too large");
++            File backup;
++            try { backup = LayoutRecoveryFiles.backupIfUnchanged(file.getBaseFile(), expected); }
++            catch (LayoutRecoveryFiles.Changed e) { throw new RevisionConflict(); }
++            try {
++                if (!MessageDigest.isEqual(expected, LayoutRecoveryFiles.fingerprint(file.getBaseFile()))) throw new RevisionConflict();
++                writeAtomicGuarded(file, data, guard, generation);
++            } catch (IOException | RuntimeException e) {
++                if (!backup.delete()) backup.deleteOnExit();
++                throw e;
++            }
++            return last + 1;
++        }
++    }
+ }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java
+new file mode 100644
+index 00000000..9bdd9c65
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java
+@@ -0,0 +1,47 @@
++package com.limelight.binding.input.virtual_controller;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++
++/** Bounded, non-destructive backup of the exact file the player saw as invalid. */
++public final class LayoutRecoveryFiles {
++    private static final long MAX_RECOVERY_BYTES = 8L * 1024 * 1024;
++    public static final class Changed extends IOException {
++        public Changed() { super("invalid layout changed since it was read"); }
++    }
++    private LayoutRecoveryFiles() { }
++
++    private static MessageDigest digest() throws IOException {
++        try { return MessageDigest.getInstance("SHA-256"); }
++        catch (NoSuchAlgorithmException e) { throw new IOException("SHA-256 unavailable", e); }
++    }
++    private static byte[] copy(File source, File backup) throws IOException {
++        MessageDigest hash = digest(); long total = 0;
++        try (FileInputStream in = new FileInputStream(source);
++             FileOutputStream out = backup == null ? null : new FileOutputStream(backup)) {
++            byte[] block = new byte[8192]; int n;
++            while ((n = in.read(block)) != -1) {
++                total += n; if (total > MAX_RECOVERY_BYTES) throw new IOException("invalid layout too large to recover");
++                hash.update(block, 0, n); if (out != null) out.write(block, 0, n);
++            }
++            if (out != null) out.getFD().sync();
++        }
++        return hash.digest();
++    }
++    public static byte[] fingerprint(File source) throws IOException { return copy(source, null); }
++    public static File backupIfUnchanged(File source, byte[] expected) throws IOException {
++        if (expected == null || expected.length != 32) throw new IOException("missing recovery fingerprint");
++        File backup = File.createTempFile(source.getName() + ".invalid-", ".backup", source.getParentFile());
++        try {
++            if (!MessageDigest.isEqual(expected, copy(source, backup))) throw new Changed();
++            return backup;
++        } catch (IOException | RuntimeException e) {
++            if (!backup.delete()) backup.deleteOnExit();
++            throw e;
++        }
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+index e56ae993..00f2fb6f 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -86,6 +86,7 @@ public class VirtualController {
+     private int appId;
+     private LayoutProfileStore profileStore;
+     private long profileRevision;
++    private byte[] invalidProfileFingerprint;
+     private boolean localHaptics, idleFade, highContrast, beforeHaptics, beforeFade, beforeContrast, undoHaptics, undoFade, undoContrast;
+     boolean localHapticsEnabled() { return localHaptics; }
+     boolean idleFadeEnabled() { return idleFade; }
+@@ -265,7 +266,7 @@ public class VirtualController {
+         HashMap<String, JSONObject> fallback = null;
+         try { fallback = snapshotGeometry(); } catch (org.json.JSONException ignored) { }
+         profileStore = null;
+-        profileRevision = 0; setVisualOptions(false, false, false);
++        profileRevision = 0; invalidProfileFingerprint = null; setVisualOptions(false, false, false);
+         try {
+             boolean floating = PreferenceManager.getDefaultSharedPreferences(context).getBoolean("checkbox_floating_sticks", true);
+             int orientation = context.getResources().getConfiguration().orientation;
+@@ -284,6 +285,9 @@ public class VirtualController {
+                 }
+             }
+             if (adjusted && profileRevision > 0) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
++        } catch (LayoutProfileStore.InvalidProfile e) {
++            invalidProfileFingerprint = e.fingerprint;
++            Toast.makeText(context, R.string.nxb_layout_recovery_hint, Toast.LENGTH_LONG).show();
+         } catch (Exception e) {
+             Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show();
+         }
+@@ -392,7 +396,8 @@ public class VirtualController {
+         try {
+             HashMap<String, JSONObject> old = snapshotGeometry();
+             boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
+-            if (profileStore.previewPrevious(elements, this)) {
++            boolean found = invalidProfileFingerprint != null ? profileStore.previewLatestValidHistory(elements, this) : profileStore.previewPrevious(elements, this);
++            if (found) {
+                 try {
+                     boolean adjusted = constrainElementsToSafeArea();
+                     profileStore.capture(elements, localHaptics, idleFade, highContrast);
+@@ -440,7 +445,7 @@ public class VirtualController {
+         editorStatus = new TextView(context);
+         editorStatus.setTextColor(0xFFF2FAF3); editorStatus.setTextSize(14);
+         editorStatus.setMaxLines(2); editorStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
+-        editorStatus.setText((gameName == null ? "" : gameName + " · ") + context.getString(R.string.nxb_layout_unsaved));
++        editorStatus.setText((gameName == null ? "" : gameName + " · ") + context.getString(invalidProfileFingerprint != null ? R.string.nxb_layout_recovery_hint : R.string.nxb_layout_unsaved));
+         int statusWidth = Math.min((int)(layoutWidth() * 0.24f), (int)(320 * context.getResources().getDisplayMetrics().density));
+         editorBar.addView(editorStatus, new LinearLayout.LayoutParams(statusWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
+         HorizontalScrollView scroller = new HorizontalScrollView(context);
+@@ -652,6 +657,17 @@ public class VirtualController {
+     private void saveEditing() {
+         if (!isEditing() || saving) return;
+         if (geometryChangedWhileSaving) { Toast.makeText(context, R.string.nxb_layout_display_changed, Toast.LENGTH_LONG).show(); return; }
++        if (invalidProfileFingerprint != null) {
++            new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_recovery_title)
++                    .setMessage(R.string.nxb_layout_recovery_explain)
++                    .setNegativeButton(android.R.string.cancel, null)
++                    .setPositiveButton(R.string.nxb_layout_recovery_save, (dialog, which) -> saveDraft(true)).show();
++            return;
++        }
++        saveDraft(false);
++    }
++    private void saveDraft(boolean recover) {
++        if (!isEditing() || saving || geometryChangedWhileSaving) return;
+         releaseAll();
+         if (profileStore == null) { Toast.makeText(context, R.string.nxb_layout_save_failed, Toast.LENGTH_LONG).show(); return; }
+         final JSONObject draft;
+@@ -662,12 +678,14 @@ public class VirtualController {
+         final long expected = profileRevision;
+         final long generation = layoutCommitGuard.snapshot();
+         final LayoutProfileStore store = profileStore;
++        final byte[] fingerprint = recover ? invalidProfileFingerprint : null;
++        if (recover && fingerprint == null) { saving = false; return; }
+         new Thread(() -> {
+             try {
+-                long updated = store.save(draft, expected, snapshot, layoutCommitGuard, generation);
+-                handler.post(() -> { if (destroyed) return; profileRevision = updated; saving = false; finishEditing();
++                long updated = recover ? store.recoverAndSave(draft, fingerprint, snapshot, layoutCommitGuard, generation) : store.save(draft, expected, snapshot, layoutCommitGuard, generation);
++                handler.post(() -> { if (destroyed) return; profileRevision = updated; invalidProfileFingerprint = null; saving = false; finishEditing();
+                     if (geometryChangedWhileSaving) { geometryChangedWhileSaving = false; refreshLayout(); }
+-                    Toast.makeText(context, R.string.nxb_layout_saved, Toast.LENGTH_SHORT).show(); });
++                    Toast.makeText(context, recover ? R.string.nxb_layout_recovery_done : R.string.nxb_layout_saved, Toast.LENGTH_SHORT).show(); });
+             } catch (Exception e) {
+                 final int message = e instanceof LayoutProfileStore.RevisionConflict ? R.string.nxb_layout_conflict :
+                         e instanceof LayoutCommitGuard.StaleDisplay ? R.string.nxb_layout_display_changed : R.string.nxb_layout_save_failed;
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index d9f48ace..1942bed5 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -301,6 +301,11 @@
+     <string name="nxb_layout_game_running">编辑时游戏仍在运行</string>
+     <string name="nxb_layout_invalid">请检查控件大小、屏幕边界和重叠区域</string>
+     <string name="nxb_layout_load_failed">布局无法读取，原文件已保留</string>
++    <string name="nxb_layout_recovery_hint">布局无法读取 · 可保存恢复</string>
++    <string name="nxb_layout_recovery_title">恢复无法读取的布局？</string>
++    <string name="nxb_layout_recovery_explain">会先在本机备份原布局文件，再保存当前草稿。也可以先选择“上个版本”预览最近的有效版本。</string>
++    <string name="nxb_layout_recovery_save">备份并保存</string>
++    <string name="nxb_layout_recovery_done">原布局已备份，当前布局已保存</string>
+     <string name="nxb_layout_save_failed">保存失败，草稿仍保留</string>
+     <string name="nxb_layout_saved">布局已保存</string>
+     <string name="nxb_layout_entry">控制布局</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index d84ad87f..f0c8ea43 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -320,6 +320,11 @@
+     <string name="nxb_layout_game_running">The game continues running while editing</string>
+     <string name="nxb_layout_invalid">Check control size, screen bounds and overlapping controls</string>
+     <string name="nxb_layout_load_failed">Layout could not be loaded; the previous file was kept</string>
++    <string name="nxb_layout_recovery_hint">Layout unavailable · save to recover</string>
++    <string name="nxb_layout_recovery_title">Recover unavailable layout?</string>
++    <string name="nxb_layout_recovery_explain">The original file will be backed up on this device before the current draft is saved. You can also preview the latest valid previous version first.</string>
++    <string name="nxb_layout_recovery_save">Back up and save</string>
++    <string name="nxb_layout_recovery_done">Original backed up; layout saved</string>
+     <string name="nxb_layout_save_failed">Could not save layout; your draft is still open</string>
+     <string name="nxb_layout_saved">Layout saved</string>
+     <string name="nxb_layout_entry">Control layout</string>

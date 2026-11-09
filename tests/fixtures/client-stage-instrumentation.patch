@@ -1,0 +1,78 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 363
++        versionCode = 364
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
++++ b/app/src/main/java/com/limelight/binding/input/ControllerHandler.java
+@@ -1429,6 +1429,7 @@
+                     (short)0, (byte)0, (byte)0, (short)0, (short)0, (short)0, (short)0);
+         }
+         else {
++            if (touch && controllerNumber == 0) ClientStageTiming.mark(leftTrigger);
+             conn.sendControllerInput(controllerNumber, getActiveControllerMask(),
+                     inputMap,
+                     leftTrigger, rightTrigger,
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -262,6 +262,11 @@
+ 
+     @Override
+     public boolean onTouchEvent(MotionEvent event) {
++        boolean stageProbe = this instanceof DigitalButton && elementId == EID_LT &&
++                virtualController.getControllerMode() == VirtualController.ControllerMode.Active &&
++                (event.getActionMasked() == MotionEvent.ACTION_DOWN || event.getActionMasked() == MotionEvent.ACTION_UP);
++        if (stageProbe) com.limelight.binding.input.ClientStageTiming.begin(event);
++        try {
+         updateOwners(event);
+         // Ignore secondary touches on controls
+         //
+@@ -350,6 +355,9 @@
+             }
+         }
+         return true;
++        } finally {
++            if (stageProbe) com.limelight.binding.input.ClientStageTiming.end();
++        }
+     }
+ 
+     abstract protected void onElementDraw(Canvas canvas);
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/ClientStageTiming.java
+@@ -0,0 +1,30 @@
++package com.limelight.binding.input;
++
++import android.os.SystemClock;
++import android.util.Log;
++import android.view.MotionEvent;
++
++/** Diagnostic-only probe: no network I/O, temporary values live on the event thread. */
++public final class ClientStageTiming {
++    private static final ThreadLocal<Sample> ACTIVE = new ThreadLocal<>();
++    private static final class Sample {
++        int action; long eventMs, entryUptimeMs, entryNs, sendNs = -1;
++    }
++    public static void begin(MotionEvent event) {
++        Sample s = new Sample(); s.action = event.getActionMasked();
++        s.eventMs = event.getEventTime(); s.entryUptimeMs = SystemClock.uptimeMillis(); s.entryNs = System.nanoTime();
++        ACTIVE.set(s);
++    }
++    public static void mark(byte leftTrigger) {
++        Sample s = ACTIVE.get(); if (s == null || s.sendNs != -1) return;
++        boolean pressed = (leftTrigger & 255) >= 128;
++        if (pressed == (s.action == MotionEvent.ACTION_DOWN)) s.sendNs = System.nanoTime();
++    }
++    public static void end() {
++        Sample s = ACTIVE.get(); ACTIVE.remove(); if (s == null) return;
++        long endNs = System.nanoTime();
++        Log.i("NXBClientStage", "v1 action=" + s.action + " event_ms=" + s.eventMs + " entry_ms=" + s.entryUptimeMs +
++                " dispatch_ms=" + (s.entryUptimeMs - s.eventMs) + " to_call_ns=" + (s.sendNs < 0 ? -1 : s.sendNs - s.entryNs) +
++                " callback_ns=" + (endNs - s.entryNs));
++    }
++}

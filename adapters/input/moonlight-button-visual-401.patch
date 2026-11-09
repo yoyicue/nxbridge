@@ -1,0 +1,348 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 398
++        versionCode = 401
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalButton.java
+@@ -139,6 +139,8 @@
+     protected void onElementDraw(Canvas canvas) {
+         // set transparent background
+         canvas.drawColor(Color.TRANSPARENT);
++        int save = canvas.save();
++        if (virtualController.compactButtonsEnabled()) canvas.scale(0.82f, 0.82f, getWidth() / 2f, getHeight() / 2f);
+ 
+         paint.setAntiAlias(true);
+         paint.setTextSize(getPercent(getWidth(), 31));
+@@ -167,6 +169,7 @@
+             paint.setStrokeWidth(getDefaultStrokeWidth()/2);
+             canvas.drawText(text, getPercent(getWidth(), 50), getPercent(getHeight(), 63), paint);
+         }
++        canvas.restoreToCount(save);
+     }
+ 
+     private void onClickCallback() {
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerElement.java
+@@ -142,6 +142,11 @@
+     @Override
+     protected void onDraw(Canvas canvas) {
+         onElementDraw(canvas);
++        if (this instanceof DigitalButton && virtualController.isEditing() &&
++                virtualController.getControllerMode() != VirtualController.ControllerMode.TestButtons && virtualController.compactButtonsEnabled()) {
++            paint.setColor(0x668FA5B3); paint.setStrokeWidth(1); paint.setStyle(Paint.Style.STROKE);
++            canvas.drawRect(0.5f, 0.5f, getWidth() - 0.5f, getHeight() - 0.5f, paint);
++        }
+ 
+         if (currentMode != Mode.Normal || virtualController.faceGroupSelected(this) || virtualController.shoulderGroupSelected(this)) {
+             paint.setColor(configSelectedColor);
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -65,7 +65,7 @@
+     }
+ 
+     /** A complete draft is captured on the UI thread; persistence runs away from input. */
+-    JSONObject capture(List<VirtualControllerElement> elements, boolean hapticEnabled, boolean idleFade, boolean highContrast) throws JSONException, IOException {
++    JSONObject capture(List<VirtualControllerElement> elements, boolean hapticEnabled, boolean idleFade, boolean highContrast, boolean compactButtons) throws JSONException, IOException {
+         if (elements.size() == 0 || elements.size() > 32) throw new IOException("invalid control count");
+         JSONArray controls = new JSONArray();
+         Set<String> seen = new HashSet<>();
+@@ -91,13 +91,13 @@
+             }
+             controls.put(item);
+         }
+-        JSONObject doc = new JSONObject(); doc.put("schema", 3); doc.put("identity", identity); doc.put("controls", controls); doc.put("revision", 1); doc.put("haptic", hapticEnabled); doc.put("fade", idleFade); doc.put("contrast", highContrast);
++        JSONObject doc = new JSONObject(); doc.put("schema", compactButtons ? 4 : 3); doc.put("identity", identity); doc.put("controls", controls); doc.put("revision", 1); doc.put("haptic", hapticEnabled); doc.put("fade", idleFade); doc.put("contrast", highContrast); if (compactButtons) doc.put("compact_buttons", true);
+         validate(doc, elements);
+         return doc;
+     }
+ 
+-    byte[] exportPortable(List<VirtualControllerElement> elements, boolean haptic, boolean fade, boolean contrast) throws IOException, JSONException {
+-        JSONObject doc = capture(elements, haptic, fade, contrast);
++    byte[] exportPortable(List<VirtualControllerElement> elements, boolean haptic, boolean fade, boolean contrast, boolean compactButtons) throws IOException, JSONException {
++        JSONObject doc = capture(elements, haptic, fade, contrast, compactButtons);
+         // Do not export the game identity, host UUID or local revision.
+         doc.put("identity", "nxbridge-portable-v1"); doc.put("revision", 1);
+         byte[] data = doc.toString().getBytes(StandardCharsets.UTF_8);
+@@ -122,7 +122,14 @@
+     }
+ 
+     private HashMap<String, JSONObject> validate(JSONObject doc, List<VirtualControllerElement> elements) throws JSONException, IOException {
+-        if ((doc.length() != 4 && doc.length() != 5 && doc.length() != 7) || (doc.length() >= 5 && !(doc.opt("haptic") instanceof Boolean)) || (doc.length() == 7 && (!(doc.opt("fade") instanceof Boolean) || !(doc.opt("contrast") instanceof Boolean))) || !StrictLayoutJson.isInteger(doc.opt("schema")) || (doc.getLong("schema") != 1 && doc.getLong("schema") != 2 && doc.getLong("schema") != 3) || !(doc.opt("identity") instanceof String) || !identity.equals(doc.getString("identity")) || !StrictLayoutJson.isInteger(doc.opt("revision")) || doc.getLong("revision") < 1) throw new IOException("invalid profile header");
++        if (!StrictLayoutJson.isInteger(doc.opt("schema"))) throw new IOException("invalid profile schema");
++        long schemaVersion = doc.getLong("schema");
++        boolean oldHeader = (doc.length() == 4 || doc.length() == 5 || doc.length() == 7) && schemaVersion >= 1 && schemaVersion <= 3;
++        boolean newHeader = doc.length() == 8 && schemaVersion == 4 && doc.opt("compact_buttons") instanceof Boolean;
++        if ((!oldHeader && !newHeader) || (doc.length() >= 5 && !(doc.opt("haptic") instanceof Boolean)) ||
++                (doc.length() >= 7 && (!(doc.opt("fade") instanceof Boolean) || !(doc.opt("contrast") instanceof Boolean))) ||
++                !(doc.opt("identity") instanceof String) || !identity.equals(doc.getString("identity")) ||
++                !StrictLayoutJson.isInteger(doc.opt("revision")) || doc.getLong("revision") < 1) throw new IOException("invalid profile header");
+         JSONArray controls = doc.getJSONArray("controls");
+         if (controls.length() > elements.size() || controls.length() == 0 || controls.length() > 32) throw new IOException("unexpected controls");
+         HashMap<String, JSONObject> found = new HashMap<>();
+@@ -134,11 +141,11 @@
+             String id = item.getString("id");
+             if (!id.matches("(?:[1-9]|1[0-6])(?:_float)?") || found.put(id, item) != null) throw new IOException("invalid control id");
+             long schema = doc.getLong("schema");
+-            if (schema == 3 && id.endsWith("_float") && item.length() != 6) throw new IOException("missing stick settings");
++            if (schema >= 3 && id.endsWith("_float") && item.length() != 6) throw new IOException("missing stick settings");
+             if (item.length() == 6) {
+                 if (!id.endsWith("_float") || !item.has("curve")) throw new IOException("unexpected curve");
+                 JSONObject curve = item.getJSONObject("curve");
+-                boolean shape = schema == 3 ? curve.length() == 5 && curve.opt("gesture") instanceof Boolean &&
++                boolean shape = schema >= 3 ? curve.length() == 5 && curve.opt("gesture") instanceof Boolean &&
+                         StrictLayoutJson.isNumber(curve.opt("visual")) && FloatingStickMath.validVisualScale((float)curve.getDouble("visual")) :
+                         (curve.length() == 3 || (curve.length() == 4 && curve.opt("gesture") instanceof Boolean));
+                 if (!shape || !StrictLayoutJson.isNumber(curve.opt("d")) || !StrictLayoutJson.isNumber(curve.opt("s")) ||
+@@ -254,7 +261,7 @@
+ 
+     private void applyDocument(JSONObject doc, List<VirtualControllerElement> elements, VirtualController controller) throws IOException, JSONException {
+             HashMap<String, JSONObject> found = validate(doc, elements);
+-            controller.setVisualOptions(doc.optBoolean("haptic", false), doc.optBoolean("fade", false), doc.optBoolean("contrast", false));
++            controller.setVisualOptions(doc.optBoolean("haptic", false), doc.optBoolean("fade", false), doc.optBoolean("contrast", false), doc.optBoolean("compact_buttons", false));
+             for (VirtualControllerElement element : elements) {
+                 JSONObject item = found.get(key(element));
+                 if (item == null && element.isOptionalControl()) { element.setControlEnabled(false); continue; }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProjection.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProjection.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProjection.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProjection.java
+@@ -25,10 +25,10 @@
+         if (schema == 1) {
+             if (x+w > 1.000001 || y+h > 1.000001) throw new IllegalArgumentException("legacy bounds");
+             px = x*width; py = y*height; pw = w*width; ph = h*height;
+-        } else if ((schema == 2 || schema == 3) && zone) {
++        } else if ((schema == 2 || schema == 3 || schema == 4) && zone) {
+             if (x+w > 1.000001 || y+h > 1.000001) throw new IllegalArgumentException("zone bounds");
+             px = safe.left + x*sw; py = safe.top + y*sh; pw = w*sw; ph = h*sh;
+-        } else if (schema == 2 || schema == 3) {
++        } else if (schema == 2 || schema == 3 || schema == 4) {
+             double side = Math.min(sw, sh);
+             pw = w*side; ph = h*side;
+             if (invalid(pw) || invalid(ph) || pw > sw + .000001 || ph > sh + .000001)
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -87,12 +87,14 @@
+     private LayoutProfileStore profileStore;
+     private long profileRevision;
+     private byte[] invalidProfileFingerprint;
+-    private boolean localHaptics, idleFade, highContrast, beforeHaptics, beforeFade, beforeContrast, undoHaptics, undoFade, undoContrast;
++    private boolean localHaptics, idleFade, highContrast, compactButtons, beforeHaptics, beforeFade, beforeContrast, beforeCompactButtons, undoHaptics, undoFade, undoContrast, undoCompactButtons;
+     boolean localHapticsEnabled() { return localHaptics; }
+     boolean idleFadeEnabled() { return idleFade; }
+     boolean highContrastEnabled() { return highContrast; }
+-    void setVisualOptions(boolean haptics, boolean fade, boolean contrast) { localHaptics = haptics; idleFade = fade; highContrast = contrast; }
+-    private void rememberUndoOptions() { undoHaptics = localHaptics; undoFade = idleFade; undoContrast = highContrast; }
++    boolean compactButtonsEnabled() { return compactButtons; }
++    void setVisualOptions(boolean haptics, boolean fade, boolean contrast) { setVisualOptions(haptics, fade, contrast, compactButtons); }
++    void setVisualOptions(boolean haptics, boolean fade, boolean contrast, boolean compact) { localHaptics = haptics; idleFade = fade; highContrast = contrast; compactButtons = compact; }
++    private void rememberUndoOptions() { undoHaptics = localHaptics; undoFade = idleFade; undoContrast = highContrast; undoCompactButtons = compactButtons; }
+     private void refreshElementVisibility() { for (VirtualControllerElement e : elements) e.refreshIdleVisibility(); }
+     private boolean saving;
+     private boolean destroyed;
+@@ -269,7 +271,7 @@
+         HashMap<String, JSONObject> fallback = null;
+         try { fallback = snapshotGeometry(); } catch (org.json.JSONException ignored) { }
+         profileStore = null;
+-        profileRevision = 0; invalidProfileFingerprint = null; setVisualOptions(false, false, false);
++        profileRevision = 0; invalidProfileFingerprint = null; setVisualOptions(false, false, false, false);
+         try {
+             boolean floating = PreferenceManager.getDefaultSharedPreferences(context).getBoolean("checkbox_floating_sticks", true);
+             int orientation = context.getResources().getConfiguration().orientation;
+@@ -279,10 +281,10 @@
+             profileRevision = profileStore.load(elements, this);
+             boolean adjusted = constrainElementsToSafeArea();
+             if (profileRevision > 0) {
+-                try { profileStore.capture(elements, localHaptics, idleFade, highContrast); }
++                try { profileStore.capture(elements, localHaptics, idleFade, highContrast, compactButtons); }
+                 catch (Exception e) {
+                     if (fallback != null) applyGeometry(fallback);
+-                    setVisualOptions(false, false, false);
++                    setVisualOptions(false, false, false, false);
+                     Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
+                     adjusted = false;
+                 }
+@@ -517,7 +519,7 @@
+     }
+     private void undoEdit() {
+         if (undoEdit == null || saving) return;
+-        try { HashMap<String, JSONObject> current = snapshotGeometry(); boolean h = localHaptics, f = idleFade, c = highContrast; applyGeometry(undoEdit); setVisualOptions(undoHaptics, undoFade, undoContrast); undoHaptics = h; undoFade = f; undoContrast = c; undoEdit = current; invalidateElements(); }
++        try { HashMap<String, JSONObject> current = snapshotGeometry(); boolean h = localHaptics, f = idleFade, c = highContrast, v = compactButtons; applyGeometry(undoEdit); setVisualOptions(undoHaptics, undoFade, undoContrast, undoCompactButtons); undoHaptics = h; undoFade = f; undoContrast = c; undoCompactButtons = v; undoEdit = current; invalidateElements(); }
+         catch (org.json.JSONException e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
+     }
+     private void previousVersion() {
+@@ -536,18 +538,18 @@
+     private void previewHistory(long revision) {
+         if (!isEditing() || saving || profileStore == null) return;
+         HashMap<String, JSONObject> old = null;
+-        boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
++        boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast, oldCompact = compactButtons;
+         try {
+             old = snapshotGeometry();
+             profileStore.previewHistory(revision, elements, this);
+             boolean adjusted = constrainElementsToSafeArea();
+-            profileStore.capture(elements, localHaptics, idleFade, highContrast);
+-            undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast;
++            profileStore.capture(elements, localHaptics, idleFade, highContrast, compactButtons);
++            undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast; undoCompactButtons = oldCompact;
+             editorStatus.setText(context.getString(R.string.nxb_layout_history_preview, revision));
+             invalidateElements();
+             if (adjusted) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
+         } catch (Exception e) {
+-            try { if (old != null) applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast); invalidateElements(); }
++            try { if (old != null) applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast, oldCompact); invalidateElements(); }
+             catch (Exception ignored) { }
+             Toast.makeText(context, R.string.nxb_layout_safe_conflict, Toast.LENGTH_LONG).show();
+         }
+@@ -556,7 +558,7 @@
+     /** A portable draft contains only controls, stick curves and UI options. */
+     public byte[] capturePortableDraft() throws java.io.IOException, org.json.JSONException {
+         if (!isEditing() || saving || profileStore == null || geometryChangedWhileSaving) throw new java.io.IOException("editor unavailable");
+-        return profileStore.exportPortable(elements, localHaptics, idleFade, highContrast);
++        return profileStore.exportPortable(elements, localHaptics, idleFade, highContrast, compactButtons);
+     }
+     public String[] recoveryBackups() throws java.io.IOException {
+         if (!isEditing() || saving || profileStore == null) throw new java.io.IOException("editor unavailable");
+@@ -576,18 +578,18 @@
+     private boolean applyPortableDraft(byte[] bytes, boolean restored) {
+         if (!isEditing() || saving || profileStore == null || geometryChangedWhileSaving) return false;
+         HashMap<String, JSONObject> old = null;
+-        boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast;
++        boolean oldHaptics = localHaptics, oldFade = idleFade, oldContrast = highContrast, oldCompact = compactButtons;
+         try {
+             old = snapshotGeometry();
+             profileStore.previewPortable(bytes, elements, this);
+             boolean adjusted = constrainElementsToSafeArea();
+-            profileStore.capture(elements, localHaptics, idleFade, highContrast);
+-            undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast;
++            profileStore.capture(elements, localHaptics, idleFade, highContrast, compactButtons);
++            undoEdit = old; undoHaptics = oldHaptics; undoFade = oldFade; undoContrast = oldContrast; undoCompactButtons = oldCompact;
+             editorStatus.setText(restored ? R.string.nxb_portable_restored : R.string.nxb_portable_preview); invalidateElements();
+             if (adjusted) Toast.makeText(context, R.string.nxb_layout_safe_adjusted, Toast.LENGTH_LONG).show();
+             return true;
+         } catch (Exception e) {
+-            try { if (old != null) applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast); invalidateElements(); }
++            try { if (old != null) applyGeometry(old); setVisualOptions(oldHaptics, oldFade, oldContrast, oldCompact); invalidateElements(); }
+             catch (Exception ignored) { }
+             return false;
+         }
+@@ -600,7 +602,7 @@
+         handler.removeCallbacks(delayedRetransmitRunnable);
+         releaseAll();
+         try {
+-            beforeEdit = snapshotGeometry(); beforeHaptics = localHaptics; beforeFade = idleFade; beforeContrast = highContrast;
++            beforeEdit = snapshotGeometry(); beforeHaptics = localHaptics; beforeFade = idleFade; beforeContrast = highContrast; beforeCompactButtons = compactButtons;
+             undoEdit = null;
+         } catch (Exception e) {
+             if (controllerHandler != null) controllerHandler.setLayoutInputSuppressed(false);
+@@ -709,13 +711,13 @@
+         }
+         final VirtualControllerElement l3 = leftClick, r3 = rightClick;
+         boolean extras = l3 != null && r3 != null;
+-        final boolean[] options = extras ? new boolean[]{localHaptics, idleFade, highContrast, l3.isControlEnabled(), r3.isControlEnabled()} : new boolean[]{localHaptics, idleFade, highContrast};
++        final boolean[] options = extras ? new boolean[]{localHaptics, idleFade, highContrast, compactButtons, l3.isControlEnabled(), r3.isControlEnabled()} : new boolean[]{localHaptics, idleFade, highContrast, compactButtons};
+         android.os.Vibrator deviceVibrator = (android.os.Vibrator)context.getSystemService(Context.VIBRATOR_SERVICE);
+         final boolean hasHapticDevice = deviceVibrator != null && deviceVibrator.hasVibrator();
+         final boolean previousHaptic = localHaptics;
+         String hapticLabel = context.getString(hasHapticDevice ? R.string.nxb_haptic_on : R.string.nxb_haptic_unavailable);
+-        String[] labels = extras ? new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_button_l3), context.getString(R.string.nxb_button_r3)} :
+-                new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast)};
++        String[] labels = extras ? new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_compact_buttons), context.getString(R.string.nxb_button_l3), context.getString(R.string.nxb_button_r3)} :
++                new String[]{hapticLabel, context.getString(R.string.nxb_idle_fade), context.getString(R.string.nxb_high_contrast), context.getString(R.string.nxb_compact_buttons)};
+         new AlertDialog.Builder(context).setTitle(R.string.nxb_layout_haptic)
+                 .setMultiChoiceItems(labels, options, (dialog, which, checked) -> {
+                     if (which == 0 && !hasHapticDevice) {
+@@ -727,8 +729,8 @@
+                 })
+                 .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                     try { undoEdit = snapshotGeometry(); rememberUndoOptions(); } catch (org.json.JSONException ignored) { undoEdit = null; }
+-                    releaseAll(); setVisualOptions(hasHapticDevice ? options[0] : previousHaptic, options[1], options[2]);
+-                    if (l3 != null && r3 != null) { l3.setControlEnabled(options[3]); r3.setControlEnabled(options[4]); }
++                    releaseAll(); setVisualOptions(hasHapticDevice ? options[0] : previousHaptic, options[1], options[2], options[3]);
++                    if (l3 != null && r3 != null) { l3.setControlEnabled(options[4]); r3.setControlEnabled(options[5]); }
+                     invalidateElements();
+                 }).setNegativeButton(android.R.string.cancel, null).show();
+     }
+@@ -760,7 +762,7 @@
+                     try {
+                         // Reject the entire candidate rather than saving an unsafe or overlapping preset.
+                         if (profileStore == null) throw new IllegalStateException("layout store unavailable");
+-                        profileStore.capture(elements, localHaptics, idleFade, highContrast);
++                        profileStore.capture(elements, localHaptics, idleFade, highContrast, compactButtons);
+                         editorStatus.setText(choices[which] + " · " + context.getString(R.string.nxb_layout_unsaved));
+                     } catch (Exception e) {
+                         try { if (undoEdit != null) applyGeometry(undoEdit); } catch (Exception ignored) { }
+@@ -815,7 +817,7 @@
+     private void importLegacy(boolean common) {
+         if (!isEditing() || saving || profileStore == null) return;
+         HashMap<String, JSONObject> old = null;
+-        boolean h = localHaptics, f = idleFade, c = highContrast;
++        boolean h = localHaptics, f = idleFade, c = highContrast, v = compactButtons;
+         try {
+             old = snapshotGeometry();
+             if (common) {
+@@ -836,14 +838,14 @@
+                 LayoutProfileStore legacy = new LayoutProfileStore(context, identity, layoutWidth(), layoutHeight(), safeArea());
+                 if (legacy.load(elements, this) == 0) { Toast.makeText(context, R.string.nxb_import_missing, Toast.LENGTH_SHORT).show(); return; }
+             }
+-            profileStore.capture(elements, localHaptics, idleFade, highContrast);
+-            undoEdit = old; undoHaptics = h; undoFade = f; undoContrast = c;
++            profileStore.capture(elements, localHaptics, idleFade, highContrast, compactButtons);
++            undoEdit = old; undoHaptics = h; undoFade = f; undoContrast = c; undoCompactButtons = v;
+             constrainElementsToSafeArea();
+-            profileStore.capture(elements, localHaptics, idleFade, highContrast);
++            profileStore.capture(elements, localHaptics, idleFade, highContrast, compactButtons);
+             editorStatus.setText(context.getString(R.string.nxb_import_draft)); invalidateElements();
+         } catch (Exception e) {
+             if (old != null) try { applyGeometry(old); } catch (Exception ignored) {}
+-            setVisualOptions(h, f, c); invalidateElements();
++            setVisualOptions(h, f, c, v); invalidateElements();
+             Toast.makeText(context, R.string.nxb_import_failed, Toast.LENGTH_LONG).show();
+         }
+     }
+@@ -931,7 +933,7 @@
+         if (!isEditing() || saving) return;
+         releaseAll();
+         try {
+-            applyGeometry(beforeEdit); setVisualOptions(beforeHaptics, beforeFade, beforeContrast);
++            applyGeometry(beforeEdit); setVisualOptions(beforeHaptics, beforeFade, beforeContrast, beforeCompactButtons);
+         } catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_load_failed, Toast.LENGTH_LONG).show(); }
+         finishEditing();
+         if (geometryChangedWhileSaving) { geometryChangedWhileSaving = false; refreshLayout(); }
+@@ -954,7 +956,7 @@
+         if (profileStore == null) { Toast.makeText(context, R.string.nxb_layout_save_failed, Toast.LENGTH_LONG).show(); return; }
+         final JSONObject draft;
+         final ArrayList<VirtualControllerElement> snapshot = new ArrayList<>(elements);
+-        try { draft = profileStore.capture(snapshot, localHaptics, idleFade, highContrast); }
++        try { draft = profileStore.capture(snapshot, localHaptics, idleFade, highContrast, compactButtons); }
+         catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_invalid, Toast.LENGTH_LONG).show(); return; }
+         saving = true;
+         final long expected = profileRevision;
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -389,4 +389,5 @@
+     <string name="nxb_shoulder_group_on">肩键联动：开</string>
+     <string name="nxb_shoulder_group_left">左肩键组</string>
+     <string name="nxb_shoulder_group_right">右肩键组</string>
++    <string name="nxb_compact_buttons">缩小圆形按键图案 · 触摸范围不变</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -408,4 +408,5 @@
+     <string name="nxb_shoulder_group_on">Shoulder pairs: on</string>
+     <string name="nxb_shoulder_group_left">Left shoulder pair</string>
+     <string name="nxb_shoulder_group_right">Right shoulder pair</string>
++    <string name="nxb_compact_buttons">Smaller round button graphics · touch area unchanged</string>
+ </resources>

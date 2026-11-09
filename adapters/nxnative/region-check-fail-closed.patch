@@ -1,0 +1,11 @@
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -1569,6 +1569,8 @@
+         return time.time() - seen.get('nnmain', time.time()) > REGION_CHECK_NNMAIN_SECS
+     rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS + REGION_CHECK_NNMAIN_SECS, done)
+     rmtree(rd)
++    if 'nnmain' not in seen and '>>> nnMain' not in log.read_text(errors='replace'):
++        raise BuildError(f'address-region check did not reach nnMain (exit {rc}); see {log}')
+     try: rows = table.read_text(errors='replace')
+     except OSError: rows = ''
+     import nso_syms

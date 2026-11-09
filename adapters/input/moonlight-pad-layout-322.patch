@@ -1,0 +1,94 @@
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+@@ -158,30 +158,30 @@
+     private static final int TRIGGER_L_BASE_X = 5;
+     private static final int TRIGGER_R_BASE_X = 101;
+     private static final int TRIGGER_DISTANCE = 11;
+-    private static final int TRIGGER_BASE_Y = 20;
++    private static final int TRIGGER_BASE_Y = 19;
+     private static final int TRIGGER_WIDTH = 9;
+-    private static final int TRIGGER_HEIGHT = 6;
++    private static final int TRIGGER_HEIGHT = 7;
+ 
+     // Face buttons are defined based on the Y button (button number 9)
+     private static final int BUTTON_BASE_X = 110;
+-    private static final int BUTTON_BASE_Y = 28;
+-    private static final int BUTTON_SIZE = 6;
++    private static final int BUTTON_BASE_Y = 27;
++    private static final int BUTTON_SIZE = 7;
+ 
+     private static final int DPAD_BASE_X = 4;
+-    private static final int DPAD_BASE_Y = 49;
++    private static final int DPAD_BASE_Y = 54;
+     private static final int DPAD_SIZE = 15;
+ 
+     private static final int ANALOG_L_BASE_X = 4;
+-    private static final int ANALOG_L_BASE_Y = 30;
++    private static final int ANALOG_L_BASE_Y = 35;
+     private static final int ANALOG_R_BASE_X = 105;
+-    private static final int ANALOG_R_BASE_Y = 49;
+-    private static final int ANALOG_SIZE = 16;
++    private static final int ANALOG_R_BASE_Y = 52;
++    private static final int ANALOG_SIZE = 17;
+ 
+     private static final int L3_R3_BASE_Y = 60;
+ 
+     private static final int START_X = 84;
+     private static final int BACK_X = 28;
+-    private static final int START_BACK_Y = 20;
++    private static final int START_BACK_Y = 13;
+     private static final int START_BACK_WIDTH = 7;
+     private static final int START_BACK_HEIGHT = 6;
+ 
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/DigitalPad.java
+@@ -42,24 +42,27 @@
+         paint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+         paint.setTextSize(getCorrectWidth() * 0.15f);
+         paint.setStrokeWidth(getDefaultStrokeWidth());
+-        drawDirection(canvas, 1f / 6, 0.5f, "◀", DIGITAL_PAD_DIRECTION_LEFT);
+-        drawDirection(canvas, 0.5f, 1f / 6, "▲", DIGITAL_PAD_DIRECTION_UP);
+-        drawDirection(canvas, 5f / 6, 0.5f, "▶", DIGITAL_PAD_DIRECTION_RIGHT);
+-        drawDirection(canvas, 0.5f, 5f / 6, "▼", DIGITAL_PAD_DIRECTION_DOWN);
++        drawDirection(canvas, 0, 1, "◀", DIGITAL_PAD_DIRECTION_LEFT);
++        drawDirection(canvas, 1, 0, "▲", DIGITAL_PAD_DIRECTION_UP);
++        drawDirection(canvas, 2, 1, "▶", DIGITAL_PAD_DIRECTION_RIGHT);
++        drawDirection(canvas, 1, 2, "▼", DIGITAL_PAD_DIRECTION_DOWN);
+     }
+ 
+-    private void drawDirection(Canvas canvas, float x, float y, String label, int bit) {
+-        float cx = getWidth() * x, cy = getHeight() * y;
+-        float radius = Math.min(getWidth(), getHeight()) * 0.145f;
++    private void drawDirection(Canvas canvas, int col, int row, String label, int bit) {
++        float w = getWidth() / 3f, h = getHeight() / 3f;
++        float inset = Math.max(2f, getDefaultStrokeWidth());
++        float left = col * w + inset, top = row * h + inset;
++        float right = (col + 1) * w - inset, bottom = (row + 1) * h - inset;
++        float corner = Math.min(w, h) * 0.14f;
+         boolean active = (direction & bit) != 0;
++        paint.setStyle(Paint.Style.FILL);
+         paint.setColor(active ? 0xC0208396 : 0x70121D29);
+-        paint.setStyle(Paint.Style.FILL);
+-        canvas.drawCircle(cx, cy, radius, paint);
++        canvas.drawRoundRect(left, top, right, bottom, corner, corner, paint);
+         paint.setStyle(Paint.Style.STROKE);
+         paint.setColor(active ? pressedColor : getDefaultColor());
+-        canvas.drawCircle(cx, cy, radius, paint);
++        canvas.drawRoundRect(left, top, right, bottom, corner, corner, paint);
+         paint.setStyle(Paint.Style.FILL);
+-        canvas.drawText(label, cx, cy - (paint.ascent() + paint.descent()) / 2, paint);
++        canvas.drawText(label, (left + right) / 2, (top + bottom - paint.ascent() - paint.descent()) / 2, paint);
+     }
+ 
+     private void newDirectionCallback(int direction) {
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 320
++        versionCode = 322
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'

@@ -1,0 +1,69 @@
+diff --git a/dm/tools/nx_extract/Program.cs b/dm/tools/nx_extract/Program.cs
+index 870cf5c..1b98256 100644
+--- a/dm/tools/nx_extract/Program.cs
++++ b/dm/tools/nx_extract/Program.cs
+@@ -11,7 +11,7 @@
+ //   read from the meta NCA's header with the keys' header_key. For a package without a ticket and without a [title ID] in its name (the NSP script's title_of); exit code 5 when it has no meta NCA.
+ // Title keys come from the common tickets (.tik) inside the NSPs, so only prod.keys is needed; key values are never printed.
+ // The base game may also be a cartridge dump (.xci, Monster Hunter Rise): its secure partition holds the NCAs, which carry their keys in the key area (no ticket).
+-//   When the cartridge also carries an update (1G+1U), only the base game's NCAs (those its Application content meta lists) are read; the update comes from the update NSP.
++//   When a cartridge carries an update (1G+1U), the same XCI may be passed as both base and update: Application and Patch content metadata select their own NCAs.
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
+@@ -41,7 +41,8 @@ static class P {
+         if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>"); return 2; }
+         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
+         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image);
+-        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
++        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application);
++        var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2], IsXci(a[2]) ? ContentMetaType.Patch : null);
+         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
+         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
+         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
+@@ -95,6 +96,12 @@ static class P {
+         return 0;
+     }
+ 
++    static bool IsXci(string path) {
++        using var f = File.OpenRead(path); f.Position = 0x100;
++        Span<byte> magic = stackalloc byte[4];
++        return f.Read(magic) == 4 && magic.SequenceEqual("HEAD"u8);
++    }
++
+     static bool Sparse(Nca n) {
+         for (int i = 0; i < 4; i++) if (n.Header.IsSectionEnabled(i) && n.Header.GetFsHeader(i).ExistsSparseLayer()) return true;
+         return false;
+@@ -148,7 +155,7 @@ static class P {
+             } else if (e.Name.EndsWith(".nca", StringComparison.OrdinalIgnoreCase)) { ncas.Add(new Nca(ks, st)); ids.Add(e.Name[..e.Name.IndexOf('.')].ToLowerInvariant()); }
+         }
+         if (only == null) return ncas;
+-        var listed = new HashSet<string>();
++        var listed = new HashSet<string>(); int matchingMetas = 0;
+         foreach (Nca n in ncas) {
+             if (n.Header.ContentType != NcaContentType.Meta) continue;
+             IFileSystem mfs = n.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+@@ -156,13 +163,21 @@ static class P {
+                 using var f = new UniqueRef<IFile>();
+                 mfs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                 var cnmt = new Cnmt(f.Release().AsStream());
+-                if (cnmt.Type == only) foreach (CnmtContentEntry c in cnmt.ContentEntries) listed.Add(Convert.ToHexString(c.NcaId).ToLowerInvariant());
++                if (cnmt.Type == only) {
++                    matchingMetas++;
++                    if (only == ContentMetaType.Patch && matchingMetas > 1) throw new Exception("more than one update metadata record; cannot choose safely");
++                    foreach (CnmtContentEntry c in cnmt.ContentEntries) listed.Add(Convert.ToHexString(c.NcaId).ToLowerInvariant());
++                }
+             }
+         }
+-        if (listed.Count == 0) return ncas;
++        if (listed.Count == 0) {
++            if (only == ContentMetaType.Patch) throw new Exception("update package has no Patch content metadata");
++            return ncas;
++        }
+         var kept = new List<Nca>(); int other = 0;   // the meta NCAs list the others, not themselves
+         for (int i = 0; i < ncas.Count; i++) if (listed.Contains(ids[i])) kept.Add(ncas[i]); else if (ncas[i].Header.ContentType != NcaContentType.Meta) other++;
+         if (!kept.Exists(n => n.Header.ContentType == NcaContentType.Program)) {   // file names that are not content IDs (renamed NCAs): nothing matches, so read every NCA as before
++            if (only == ContentMetaType.Patch) throw new Exception("update NCAs do not match Patch content metadata");
+             Console.WriteLine($"[RED] no NCA of {Path.GetFileName(path)} matches its {only} content meta by name (renamed NCA files?); reading all {ncas.Count}");
+             return ncas;
+         }

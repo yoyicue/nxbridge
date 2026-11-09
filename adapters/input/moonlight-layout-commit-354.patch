@@ -1,0 +1,166 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index 2ca9abe2..9a98cc72 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@ android {
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 353
++        versionCode = 354
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/Game.java b/app/src/main/java/com/limelight/Game.java
+index d339e964..c6255005 100644
+--- a/app/src/main/java/com/limelight/Game.java
++++ b/app/src/main/java/com/limelight/Game.java
+@@ -1124,6 +1124,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
+ 
+     @Override
+     protected void onDestroy() {
++        if (virtualController != null) virtualController.onHostDestroyed();
+         super.onDestroy();
+ 
+         if (controllerHandler != null) {
+diff --git a/app/src/main/java/com/limelight/LayoutEditorActivity.java b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+index 78e88a42..d3f55994 100644
+--- a/app/src/main/java/com/limelight/LayoutEditorActivity.java
++++ b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+@@ -39,4 +39,8 @@ public final class LayoutEditorActivity extends Activity {
+         if (controller != null && controller.isEditing()) controller.cancelEditing();
+         else super.onBackPressed();
+     }
++    @Override protected void onDestroy() {
++        if (controller != null) controller.onHostDestroyed();
++        super.onDestroy();
++    }
+ }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutCommitGuard.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutCommitGuard.java
+new file mode 100644
+index 00000000..777632a9
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutCommitGuard.java
+@@ -0,0 +1,19 @@
++package com.limelight.binding.input.virtual_controller;
++
++import java.io.IOException;
++
++/** Serializes only the final atomic commit with display/host invalidation. */
++public final class LayoutCommitGuard {
++    public static final class StaleDisplay extends IOException {
++        public StaleDisplay() { super("display changed before layout commit"); }
++    }
++    public interface Commit { void run() throws IOException; }
++    private long generation;
++
++    public synchronized long snapshot() { return generation; }
++    public synchronized void invalidate() { generation++; }
++    public synchronized void commit(long expected, Commit action) throws IOException {
++        if (expected != generation) throw new StaleDisplay();
++        action.run();
++    }
++}
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+index 6a03c5c6..d69a37be 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -186,7 +186,22 @@ final class LayoutProfileStore {
+         catch (IOException | RuntimeException e) { if (out != null) target.failWrite(out); throw new IOException("layout write failed", e); }
+     }
+ 
+-    long save(JSONObject draft, long expected, List<VirtualControllerElement> elements) throws IOException, JSONException {
++    private void writeAtomicGuarded(AtomicFile target, byte[] data, LayoutCommitGuard guard, long generation) throws IOException {
++        FileOutputStream out = null;
++        try {
++            out = target.startWrite(); out.write(data); out.getFD().sync();
++            final FileOutputStream prepared = out;
++            guard.commit(generation, () -> target.finishWrite(prepared));
++        } catch (LayoutCommitGuard.StaleDisplay e) {
++            if (out != null) target.failWrite(out);
++            throw e;
++        } catch (IOException | RuntimeException e) {
++            if (out != null) target.failWrite(out);
++            throw new IOException("layout write failed", e);
++        }
++    }
++
++    long save(JSONObject draft, long expected, List<VirtualControllerElement> elements, LayoutCommitGuard guard, long generation) throws IOException, JSONException {
+         synchronized (LOCK) {
+             JSONObject old = readDocument(file);
+             long current = old == null ? 0 : old.getLong("revision");
+@@ -208,7 +223,7 @@ final class LayoutProfileStore {
+                     throw new IOException("layout history conflict");
+                 }
+             }
+-            writeAtomic(file, data);
++            writeAtomicGuarded(file, data, guard, generation);
+             return current + 1;
+         }
+     }
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+index a471af88..e2ea16f0 100644
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -94,6 +94,8 @@ public class VirtualController {
+     private void rememberUndoOptions() { undoHaptics = localHaptics; undoFade = idleFade; undoContrast = highContrast; }
+     private void refreshElementVisibility() { for (VirtualControllerElement e : elements) e.refreshIdleVisibility(); }
+     private boolean saving;
++    private boolean destroyed;
++    private final LayoutCommitGuard layoutCommitGuard = new LayoutCommitGuard();
+     private boolean controlsShown = true;
+     private boolean layoutInitialized;
+     private LayoutSafeArea safeArea;
+@@ -303,6 +305,7 @@ public class VirtualController {
+             next = next.intersect(visible.left - screenPos[0], visible.top - screenPos[1],
+                     visible.right - screenPos[0], visible.bottom - screenPos[1]);
+             if (!next.equals(safeArea)) {
++                layoutCommitGuard.invalidate();
+                 safeArea = next;
+                 LimeLog.info("NXBridge control safe area " + next.left + "," + next.top + "-" + next.right + "," + next.bottom);
+                 if (layoutInitialized) onDisplayChanged();
+@@ -327,6 +330,7 @@ public class VirtualController {
+     }
+ 
+     public void onDisplayChanged() {
++        layoutCommitGuard.invalidate();
+         if (saving) { geometryChangedWhileSaving = true; return; }
+         if (isEditing()) {
+             cancelEditing();
+@@ -335,6 +339,13 @@ public class VirtualController {
+         refreshLayout();
+     }
+ 
++    public void onHostDestroyed() {
++        layoutCommitGuard.invalidate();
++        destroyed = true;
++        handler.removeCallbacks(delayedRetransmitRunnable);
++        releaseAll();
++    }
++
+     private HashMap<String, JSONObject> snapshotGeometry() throws org.json.JSONException {
+         HashMap<String, JSONObject> state = new HashMap<>();
+         for (VirtualControllerElement e : elements) state.put(elementKey(e), e.getConfiguration());
+@@ -633,16 +644,18 @@ public class VirtualController {
+         catch (Exception e) { Toast.makeText(context, R.string.nxb_layout_invalid, Toast.LENGTH_LONG).show(); return; }
+         saving = true;
+         final long expected = profileRevision;
++        final long generation = layoutCommitGuard.snapshot();
+         final LayoutProfileStore store = profileStore;
+         new Thread(() -> {
+             try {
+-                long updated = store.save(draft, expected, snapshot);
+-                handler.post(() -> { profileRevision = updated; saving = false; finishEditing();
++                long updated = store.save(draft, expected, snapshot, layoutCommitGuard, generation);
++                handler.post(() -> { if (destroyed) return; profileRevision = updated; saving = false; finishEditing();
+                     if (geometryChangedWhileSaving) { geometryChangedWhileSaving = false; refreshLayout(); }
+                     Toast.makeText(context, R.string.nxb_layout_saved, Toast.LENGTH_SHORT).show(); });
+             } catch (Exception e) {
+-                final int message = e instanceof LayoutProfileStore.RevisionConflict ? R.string.nxb_layout_conflict : R.string.nxb_layout_save_failed;
+-                handler.post(() -> { saving = false; Toast.makeText(context, message, Toast.LENGTH_LONG).show(); });
++                final int message = e instanceof LayoutProfileStore.RevisionConflict ? R.string.nxb_layout_conflict :
++                        e instanceof LayoutCommitGuard.StaleDisplay ? R.string.nxb_layout_display_changed : R.string.nxb_layout_save_failed;
++                handler.post(() -> { if (destroyed) return; saving = false; Toast.makeText(context, message, Toast.LENGTH_LONG).show(); });
+             }
+         }, "NXBridge layout save").start();
+     }

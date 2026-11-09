@@ -1,0 +1,264 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 386
++        versionCode = 387
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+diff --git a/app/src/main/java/com/limelight/LayoutEditorActivity.java b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+--- a/app/src/main/java/com/limelight/LayoutEditorActivity.java
++++ b/app/src/main/java/com/limelight/LayoutEditorActivity.java
+@@ -22,9 +22,11 @@
+ public final class LayoutEditorActivity extends Activity {
+     private VirtualController controller;
+     private static final int PICK_LAYOUT = 934;
+-    private static final int IMPORT = 1, EXPORT = 2;
++    private static final int IMPORT = 1, EXPORT = 2, EXPORT_BACKUP = 3;
+     private int pendingMode;
+-    private byte[] pendingDraft, pendingFingerprint;
++    private byte[] pendingDraft, pendingFingerprint, pendingBackupFingerprint;
++    private String pendingBackupName;
++    private boolean preparingBackup;
+     private long pendingRevision;
+     private Intent deferredResult;
+     private int deferredResultCode;
+@@ -37,6 +39,9 @@
+             pendingDraft = state.getByteArray("nxb_transfer_draft");
+             pendingFingerprint = state.getByteArray("nxb_transfer_fingerprint");
+             pendingRevision = state.getLong("nxb_transfer_revision", 0);
++            pendingBackupName = state.getString("nxb_backup_name");
++            pendingBackupFingerprint = state.getByteArray("nxb_backup_fingerprint");
++            if (pendingMode == EXPORT_BACKUP && (pendingBackupName == null || pendingBackupFingerprint == null)) pendingMode = 0;
+             if (pendingDraft == null) pendingMode = 0;
+         }
+         requestWindowFeature(Window.FEATURE_NO_TITLE);
+@@ -70,11 +75,60 @@
+         });
+     }
+     public void choosePortableLayout(boolean export) {
+-        if (controller == null || !controller.isEditing() || pendingMode != 0) return;
++        if (controller == null || !controller.isEditing() || pendingMode != 0 || preparingBackup) return;
+         new AlertDialog.Builder(this).setTitle(export ? R.string.nxb_portable_export : R.string.nxb_portable_import)
+                 .setMessage(export ? R.string.nxb_portable_export_explain : R.string.nxb_portable_import_explain)
+                 .setNegativeButton(android.R.string.cancel, null)
+                 .setPositiveButton(android.R.string.ok, (dialog, which) -> launchPortablePicker(export)).show();
++    }
++
++    public void chooseRecoveryBackup() {
++        if (controller == null || !controller.isEditing() || pendingMode != 0 || preparingBackup) return;
++        try {
++            final String[] names = controller.recoveryBackups();
++            if (names.length == 0) { Toast.makeText(this, R.string.nxb_recovery_export_empty, Toast.LENGTH_LONG).show(); return; }
++            CharSequence[] labels = new CharSequence[names.length];
++            for (int i = 0; i < names.length; i++) labels[i] = getString(R.string.nxb_recovery_export_number, i + 1);
++            new AlertDialog.Builder(this).setTitle(R.string.nxb_recovery_export).setMessage(R.string.nxb_recovery_export_explain)
++                    .setNegativeButton(android.R.string.cancel, null)
++                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
++                        if (!alive || isFinishing() || controller == null || !controller.isEditing()) return;
++                        new AlertDialog.Builder(this).setTitle(R.string.nxb_recovery_export)
++                                .setNegativeButton(android.R.string.cancel, null)
++                                .setItems(labels, (choice, index) -> prepareRecoveryExport(names[index])).show();
++                    }).show();
++        } catch (Exception e) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); }
++    }
++    private void prepareRecoveryExport(String name) {
++        if (controller == null || !controller.isEditing() || pendingMode != 0 || preparingBackup) return;
++        final VirtualController selected = controller;
++        final byte[] draft; final byte[] fingerprint; final long revision;
++        try { draft = selected.capturePortableDraft(); fingerprint = selected.portableBaseFingerprint(); revision = selected.portableBaseRevision(); }
++        catch (Exception e) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); return; }
++        preparingBackup = true;
++        new Thread(() -> {
++            byte[] hash = null;
++            try { hash = selected.recoveryBackupFingerprint(name); } catch (Exception ignored) { }
++            final byte[] result = hash;
++            runOnUiThread(() -> {
++                preparingBackup = false;
++                if (!alive || isFinishing() || controller != selected) return;
++                try {
++                    if (result == null || pendingMode != 0 || !selected.portableBaseMatches(revision, fingerprint) || !Arrays.equals(draft, selected.capturePortableDraft()))
++                        throw new java.io.IOException("editor changed");
++                    pendingDraft = draft; pendingRevision = revision; pendingFingerprint = fingerprint;
++                    pendingBackupName = name; pendingBackupFingerprint = result; pendingMode = EXPORT_BACKUP;
++                    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream");
++                    if (android.os.Build.VERSION.SDK_INT >= 26) intent.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
++                            android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Download"));
++                    intent.putExtra(Intent.EXTRA_TITLE, "NXBridge-invalid-layout.backup");
++                    startActivityForResult(intent, PICK_LAYOUT);
++                } catch (Exception e) {
++                    pendingMode = 0; pendingDraft = null; pendingBackupName = null; pendingBackupFingerprint = null;
++                    Toast.makeText(this, R.string.nxb_portable_picker_failed, Toast.LENGTH_LONG).show();
++                }
++            });
++        }, "NXBridge backup fingerprint").start();
+     }
+ 
+     private void launchPortablePicker(boolean export) {
+@@ -103,6 +157,7 @@
+         if (pendingMode != 0 && pendingDraft != null) {
+             state.putInt("nxb_transfer_mode", pendingMode); state.putByteArray("nxb_transfer_draft", pendingDraft);
+             state.putByteArray("nxb_transfer_fingerprint", pendingFingerprint); state.putLong("nxb_transfer_revision", pendingRevision);
++            state.putString("nxb_backup_name", pendingBackupName); state.putByteArray("nxb_backup_fingerprint", pendingBackupFingerprint);
+         }
+         super.onSaveInstanceState(state);
+     }
+@@ -116,7 +171,9 @@
+ 
+     private void handlePortableResult(int result, Intent data) {
+         int mode = pendingMode; byte[] draft = pendingDraft, fingerprint = pendingFingerprint; long revision = pendingRevision;
+-        pendingMode = 0; pendingDraft = null; pendingFingerprint = null;
++        final String backupName = pendingBackupName; final byte[] backupHash = pendingBackupFingerprint;
++        final VirtualController selected = controller;
++        pendingMode = 0; pendingDraft = null; pendingFingerprint = null; pendingBackupName = null; pendingBackupFingerprint = null;
+         if (mode == 0 || draft == null || result != RESULT_OK || data == null || data.getData() == null) return;
+         Uri uri = data.getData();
+         if (!"content".equals(uri.getScheme())) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); return; }
+@@ -126,9 +183,10 @@
+                 if (mode == IMPORT) {
+                     try (InputStream input = getContentResolver().openInputStream(uri)) { imported = PortableLayoutFile.read(input); }
+                 } else {
++                    byte[] bytes = mode == EXPORT_BACKUP ? selected.readRecoveryBackup(backupName, backupHash) : draft;
+                     try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+                         if (output == null) throw new java.io.IOException("document unavailable");
+-                        output.write(draft); output.flush();
++                        output.write(bytes); output.flush();
+                     }
+                 }
+                 success = true;
+@@ -137,7 +195,7 @@
+             runOnUiThread(() -> {
+                 if (!alive || isFinishing() || controller == null) return;
+                 if (!finished) { Toast.makeText(this, R.string.nxb_portable_failed, Toast.LENGTH_LONG).show(); return; }
+-                if (mode == EXPORT) { Toast.makeText(this, R.string.nxb_portable_export_done, Toast.LENGTH_SHORT).show(); return; }
++                if (mode == EXPORT || mode == EXPORT_BACKUP) { Toast.makeText(this, mode == EXPORT ? R.string.nxb_portable_export_done : R.string.nxb_recovery_export_done, Toast.LENGTH_SHORT).show(); return; }
+                 try {
+                     if (!controller.portableBaseMatches(revision, fingerprint) || !Arrays.equals(draft, controller.capturePortableDraft())) {
+                         Toast.makeText(this, R.string.nxb_portable_conflict, Toast.LENGTH_LONG).show(); return;
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutRecoveryFiles.java
+@@ -1,5 +1,6 @@
+ package com.limelight.binding.input.virtual_controller;
+ 
++import java.io.ByteArrayOutputStream;
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+@@ -32,6 +33,48 @@
+         }
+         return hash.digest();
+     }
++    /** Only files created for this exact profile are exposed, never arbitrary paths. */
++    public static String[] backupNames(File source) throws IOException {
++        File parent = source.getCanonicalFile().getParentFile();
++        String prefix = source.getName() + ".invalid-";
++        File[] files = parent.listFiles((dir, name) -> name.startsWith(prefix) && name.endsWith(".backup"));
++        if (files == null) throw new IOException("backup directory unavailable");
++        java.util.ArrayList<File> accepted = new java.util.ArrayList<>();
++        for (File candidate : files) {
++            if (candidate.isFile() && parent.equals(candidate.getCanonicalFile().getParentFile()) &&
++                    candidate.getCanonicalFile().equals(candidate.getAbsoluteFile())) accepted.add(candidate);
++        }
++        accepted.sort((a,b) -> { int time = Long.compare(b.lastModified(), a.lastModified()); return time != 0 ? time : a.getName().compareTo(b.getName()); });
++        String[] names = new String[accepted.size()];
++        for (int i = 0; i < names.length; i++) names[i] = accepted.get(i).getName();
++        return names;
++    }
++    private static File backupFor(File source, String name) throws IOException {
++        if (name == null || !name.startsWith(source.getName() + ".invalid-") || !name.endsWith(".backup") ||
++                !name.equals(new File(name).getName())) throw new IOException("invalid backup name");
++        File parent = source.getCanonicalFile().getParentFile();
++        File candidate = new File(parent, name);
++        if (!candidate.isFile() || !parent.equals(candidate.getCanonicalFile().getParentFile()) ||
++                !candidate.getCanonicalFile().equals(candidate.getAbsoluteFile())) throw new IOException("backup unavailable");
++        return candidate;
++    }
++    public static byte[] backupFingerprint(File source, String name) throws IOException {
++        return fingerprint(backupFor(source, name));
++    }
++    public static byte[] readBackupIfUnchanged(File source, String name, byte[] expected) throws IOException {
++        if (expected == null || expected.length != 32) throw new IOException("missing backup fingerprint");
++        MessageDigest hash = digest(); long total = 0;
++        ByteArrayOutputStream result = new ByteArrayOutputStream();
++        try (FileInputStream in = new FileInputStream(backupFor(source, name))) {
++            byte[] block = new byte[8192]; int n;
++            while ((n = in.read(block)) != -1) {
++                total += n; if (total > MAX_RECOVERY_BYTES) throw new IOException("invalid layout too large to export");
++                hash.update(block, 0, n); result.write(block, 0, n);
++            }
++        }
++        if (!MessageDigest.isEqual(expected, hash.digest())) throw new Changed();
++        return result.toByteArray();
++    }
+     public static byte[] fingerprint(File source) throws IOException { return copy(source, null); }
+     public static File backupIfUnchanged(File source, byte[] expected) throws IOException {
+         if (expected == null || expected.length != 32) throw new IOException("missing recovery fingerprint");
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/LayoutProfileStore.java
+@@ -53,6 +53,10 @@
+             file = new AtomicFile(new File(dir, name + ".json"));
+         } catch (Exception e) { throw new IllegalArgumentException("layout storage unavailable", e); }
+     }
++
++    String[] recoveryBackups() throws IOException { return LayoutRecoveryFiles.backupNames(file.getBaseFile()); }
++    byte[] recoveryBackupFingerprint(String name) throws IOException { return LayoutRecoveryFiles.backupFingerprint(file.getBaseFile(), name); }
++    byte[] readRecoveryBackup(String name, byte[] fingerprint) throws IOException { return LayoutRecoveryFiles.readBackupIfUnchanged(file.getBaseFile(), name, fingerprint); }
+ 
+     private static String key(VirtualControllerElement element) {
+         return element.elementId + ((element instanceof AnalogStick && ((AnalogStick)element).isFloating()) ? "_float" : "");
+diff --git a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -517,6 +517,12 @@
+         if (!isEditing() || saving || profileStore == null || geometryChangedWhileSaving) throw new java.io.IOException("editor unavailable");
+         return profileStore.exportPortable(elements, localHaptics, idleFade, highContrast);
+     }
++    public String[] recoveryBackups() throws java.io.IOException {
++        if (!isEditing() || saving || profileStore == null) throw new java.io.IOException("editor unavailable");
++        return profileStore.recoveryBackups();
++    }
++    public byte[] recoveryBackupFingerprint(String name) throws java.io.IOException { return profileStore.recoveryBackupFingerprint(name); }
++    public byte[] readRecoveryBackup(String name, byte[] fingerprint) throws java.io.IOException { return profileStore.readRecoveryBackup(name, fingerprint); }
+     public long portableBaseRevision() { return profileRevision; }
+     public byte[] portableBaseFingerprint() { return invalidProfileFingerprint == null ? null : invalidProfileFingerprint.clone(); }
+     public boolean portableBaseMatches(long revision, byte[] fingerprint) {
+@@ -607,6 +613,7 @@
+         if (context instanceof com.limelight.LayoutEditorActivity) {
+             addEditorButton(row, R.string.nxb_portable_import, () -> ((com.limelight.LayoutEditorActivity)context).choosePortableLayout(false));
+             addEditorButton(row, R.string.nxb_portable_export, () -> ((com.limelight.LayoutEditorActivity)context).choosePortableLayout(true));
++            addEditorButton(row, R.string.nxb_recovery_export, () -> ((com.limelight.LayoutEditorActivity)context).chooseRecoveryBackup());
+         }
+         addEditorButton(row, R.string.nxb_layout_default, this::previewDefault);
+         scroller.addView(row);
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -399,4 +399,9 @@
+     <string name="nxb_stick_left_example">Left stick area · example</string>
+     <string name="nxb_stick_right_example">Right stick area · example</string>
+     <string name="nxb_haptic_unavailable">Local touch feedback · No vibrator on this device</string>
++    <string name="nxb_recovery_export">Export damaged backup</string>
++    <string name="nxb_recovery_export_empty">No damaged layout backup for this game and orientation.</string>
++    <string name="nxb_recovery_export_number">Backup %1$d (newest first)</string>
++    <string name="nxb_recovery_export_explain">Exports the original damaged file without repairing it. It may contain game identifiers or other private information. Choose a trusted location.</string>
++    <string name="nxb_recovery_export_done">Damaged layout backup exported.</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -380,4 +380,9 @@
+     <string name="nxb_stick_left_example">左摇杆区域 · 圆圈为示意</string>
+     <string name="nxb_stick_right_example">右摇杆区域 · 圆圈为示意</string>
+     <string name="nxb_haptic_unavailable">轻触反馈 · 本机没有振动器</string>
++    <string name="nxb_recovery_export">导出损坏备份</string>
++    <string name="nxb_recovery_export_empty">当前游戏和方向没有损坏布局备份。</string>
++    <string name="nxb_recovery_export_number">备份 %1$d（最新在前）</string>
++    <string name="nxb_recovery_export_explain">原样导出损坏文件，不会修复它。文件可能含有游戏标识或其他隐私信息，请选择可信位置。</string>
++    <string name="nxb_recovery_export_done">损坏布局备份已导出。</string>
+ </resources>

@@ -1,0 +1,324 @@
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/AnalogStick.java
+@@ -8,6 +8,7 @@
+ import android.graphics.Canvas;
+ import android.graphics.Color;
+ import android.graphics.Paint;
++import android.preference.PreferenceManager;
+ import android.view.MotionEvent;
+ 
+ import java.util.ArrayList;
+@@ -122,6 +123,12 @@
+     private float position_stick_y = 0;
+ 
+     private final Paint paint = new Paint();
++    private final boolean floating;
++    private float floatingOriginX, floatingOriginY, floatingX, floatingY;
++    private float floatingRadius;
++
++    public boolean isFloating() { return floating; }
++
+ 
+     private STICK_STATE stick_state = STICK_STATE.NO_MOVEMENT;
+     private CLICK_STATE click_state = CLICK_STATE.SINGLE;
+@@ -166,6 +173,10 @@
+ 
+     public AnalogStick(VirtualController controller, Context context, int elementId) {
+         super(controller, context, elementId);
++        floating = PreferenceManager.getDefaultSharedPreferences(context)
++                .getBoolean("checkbox_floating_sticks", true);
++        floatingRadius = Math.min(context.getResources().getDisplayMetrics().widthPixels,
++                context.getResources().getDisplayMetrics().heightPixels) * 0.085f;
+         // reset stick position
+         position_stick_x = getWidth() / 2;
+         position_stick_y = getHeight() / 2;
+@@ -221,6 +232,11 @@
+     protected void onElementDraw(Canvas canvas) {
+         // set transparent background
+         canvas.drawColor(Color.TRANSPARENT);
++        if (floating) {
++            drawFloating(canvas);
++            return;
++        }
++
+ 
+         paint.setStyle(Paint.Style.STROKE);
+         paint.setStrokeWidth(getDefaultStrokeWidth());
+@@ -259,6 +275,75 @@
+         }
+     }
+ 
++    private void drawFloating(Canvas canvas) {
++        paint.setAntiAlias(true);
++        if (virtualController.getControllerMode() != VirtualController.ControllerMode.Active) {
++            paint.setColor(0x44208396);
++            paint.setStyle(Paint.Style.FILL);
++            canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
++            paint.setColor(getDefaultColor());
++            paint.setStyle(Paint.Style.STROKE);
++            paint.setStrokeWidth(getDefaultStrokeWidth());
++            canvas.drawRect(1, 1, getWidth()-1, getHeight()-1, paint);
++            paint.setStyle(Paint.Style.FILL);
++            paint.setTextSize(Math.min(getResources().getDisplayMetrics().density * 18, getHeight()/4f));
++            paint.setTextAlign(Paint.Align.CENTER);
++            canvas.drawText(elementId == EID_LS ? "左摇杆区域" : "右摇杆区域",
++                    getWidth()/2f, getHeight()/2f, paint);
++            return;
++        }
++        if (!isPressed()) return;
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(0x90208396);
++        canvas.drawCircle(floatingOriginX, floatingOriginY, floatingRadius, paint);
++        paint.setColor(pressedColor);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(getDefaultStrokeWidth());
++        canvas.drawCircle(floatingOriginX, floatingOriginY, floatingRadius, paint);
++        canvas.drawCircle(floatingX, floatingY, floatingRadius * 0.23f, paint);
++    }
++
++    private boolean onFloatingTouch(MotionEvent event) {
++        switch (event.getActionMasked()) {
++            case MotionEvent.ACTION_DOWN:
++                floatingOriginX = floatingX = event.getX();
++                floatingOriginY = floatingY = event.getY();
++                if (click_state == CLICK_STATE.SINGLE &&
++                        event.getEventTime() - timeLastClick <= timeoutDoubleClick) {
++                    click_state = CLICK_STATE.DOUBLE;
++                    notifyOnDoubleClick();
++                } else {
++                    click_state = CLICK_STATE.SINGLE;
++                    notifyOnClick();
++                }
++                timeLastClick = event.getEventTime();
++                setPressed(true);
++                notifyOnMovement(0, 0);
++                break;
++            case MotionEvent.ACTION_MOVE:
++                if (isPressed()) {
++                    float[] xy = FloatingStickMath.axes(event.getX() - floatingOriginX,
++                            event.getY() - floatingOriginY, floatingRadius);
++                    floatingX = floatingOriginX + xy[0] * floatingRadius;
++                    floatingY = floatingOriginY - xy[1] * floatingRadius;
++                    notifyOnMovement(xy[0], xy[1]);
++                }
++                break;
++            case MotionEvent.ACTION_CANCEL:
++            case MotionEvent.ACTION_UP:
++                if (isPressed()) {
++                    setPressed(false);
++                    notifyOnRevoke();
++                    notifyOnMovement(0, 0);
++                }
++                break;
++            default:
++                break;
++        }
++        invalidate();
++        return true;
++    }
++
+     private void updatePosition(long eventTime) {
+         // get 100% way
+         float complete = radius_complete - radius_analog_stick;
+@@ -288,6 +373,7 @@
+ 
+     @Override
+     public boolean onElementTouchEvent(MotionEvent event) {
++        if (floating) return onFloatingTouch(event);
+         // save last click state
+         CLICK_STATE lastClickState = click_state;
+ 
+--- /dev/null
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/FloatingStickMath.java
+@@ -0,0 +1,14 @@
++package com.limelight.binding.input.virtual_controller;
++
++/** Maps displacement from a floating touch origin to a clamped controller axis. */
++public final class FloatingStickMath {
++    private FloatingStickMath() { }
++    public static float[] axes(float dx, float dy, float radius) {
++        if (!(radius > 0)) return new float[]{0, 0};
++        double length = Math.hypot(dx, dy);
++        double dead = radius * 0.12;
++        if (length <= dead) return new float[]{0, 0};
++        double magnitude = Math.min(1, (length - dead) / (radius - dead));
++        return new float[]{(float)(dx / length * magnitude), (float)(-dy / length * magnitude)};
++    }
++}
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -9,6 +9,8 @@
+ import android.os.Looper;
+ import android.util.DisplayMetrics;
+ import android.view.View;
++import android.view.MotionEvent;
++import android.os.SystemClock;
+ import android.widget.Button;
+ import android.widget.FrameLayout;
+ import android.widget.Toast;
+@@ -75,6 +77,7 @@
+                 String message;
+ 
+                 if (currentMode == ControllerMode.Active){
++                    releaseAll();
+                     currentMode = ControllerMode.MoveButtons;
+                     message = "Entering configuration mode (Move buttons)";
+                 } else if (currentMode == ControllerMode.MoveButtons) {
+@@ -103,6 +106,7 @@
+     }
+ 
+     public void hide() {
++        releaseAll();
+         for (VirtualControllerElement element : elements) {
+             element.setVisibility(View.INVISIBLE);
+         }
+@@ -119,6 +123,7 @@
+     }
+ 
+     public void removeElements() {
++        releaseAll();
+         for (VirtualControllerElement element : elements) {
+             frame_layout.removeView(element);
+         }
+@@ -139,7 +144,20 @@
+         FrameLayout.LayoutParams layoutParams = new FrameLayout.LayoutParams(width, height);
+         layoutParams.setMargins(x, y, 0, 0);
+ 
+-        frame_layout.addView(element, layoutParams);
++        if (element instanceof AnalogStick && ((AnalogStick) element).isFloating()) {
++            frame_layout.addView(element, frame_layout.indexOfChild(buttonConfigure) + 1, layoutParams);
++        } else {
++            frame_layout.addView(element, layoutParams);
++        }
++    }
++
++    private void releaseAll() {
++        long now = SystemClock.uptimeMillis();
++        for (VirtualControllerElement element : elements) {
++            MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0, 0, 0);
++            element.onElementTouchEvent(cancel);
++            cancel.recycle();
++        }
+     }
+ 
+     public List<VirtualControllerElement> getElements() {
+@@ -168,6 +186,7 @@
+ 
+         // Apply user preferences onto the default layout
+         VirtualControllerConfigurationLoader.loadFromPreferences(this, context);
++        buttonConfigure.bringToFront();
+     }
+ 
+     public ControllerMode getControllerMode() {
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualControllerConfigurationLoader.java
+@@ -8,6 +8,7 @@
+ import android.content.Context;
+ import android.content.SharedPreferences;
+ import android.util.DisplayMetrics;
++import android.preference.PreferenceManager;
+ 
+ import com.limelight.nvstream.input.ControllerPacket;
+ import com.limelight.preferences.PreferenceConfiguration;
+@@ -198,6 +199,11 @@
+         int rightDisplacement = screen.widthPixels - screen.heightPixels * 16 / 9;
+ 
+         int height = screen.heightPixels;
++        boolean floating = PreferenceManager.getDefaultSharedPreferences(context)
++                .getBoolean("checkbox_floating_sticks", true);
++        int zoneWidth = screen.widthPixels * 32 / 100;
++        int zoneTop = height * 26 / 100;
++        int zoneHeight = height * 68 / 100;
+ 
+         // NOTE: Some of these getPercent() expressions seem like they can be combined
+         // into a single call. Due to floating point rounding, this isn't actually possible.
+@@ -286,17 +292,17 @@
+             );
+ 
+             controller.addElement(createLeftStick(controller, context),
+-                    screenScale(ANALOG_L_BASE_X, height),
+-                    screenScale(ANALOG_L_BASE_Y, height),
+-                    screenScale(ANALOG_SIZE, height),
+-                    screenScale(ANALOG_SIZE, height)
++                    floating ? 0 : screenScale(ANALOG_L_BASE_X, height),
++                    floating ? zoneTop : screenScale(ANALOG_L_BASE_Y, height),
++                    floating ? zoneWidth : screenScale(ANALOG_SIZE, height),
++                    floating ? zoneHeight : screenScale(ANALOG_SIZE, height)
+             );
+ 
+             controller.addElement(createRightStick(controller, context),
+-                    screenScale(ANALOG_R_BASE_X, height) + rightDisplacement,
+-                    screenScale(ANALOG_R_BASE_Y, height),
+-                    screenScale(ANALOG_SIZE, height),
+-                    screenScale(ANALOG_SIZE, height)
++                    floating ? screen.widthPixels - zoneWidth : screenScale(ANALOG_R_BASE_X, height) + rightDisplacement,
++                    floating ? zoneTop : screenScale(ANALOG_R_BASE_Y, height),
++                    floating ? zoneWidth : screenScale(ANALOG_SIZE, height),
++                    floating ? zoneHeight : screenScale(ANALOG_SIZE, height)
+             );
+ 
+             controller.addElement(createDigitalButton(
+@@ -355,7 +361,8 @@
+         SharedPreferences.Editor prefEditor = context.getSharedPreferences(OSC_PREFERENCE, Activity.MODE_PRIVATE).edit();
+ 
+         for (VirtualControllerElement element : controller.getElements()) {
+-            String prefKey = ""+element.elementId;
++            String prefKey = ""+element.elementId +
++                    ((element instanceof AnalogStick && ((AnalogStick) element).isFloating()) ? "_float" : "");
+             try {
+                 prefEditor.putString(prefKey, element.getConfiguration().toString());
+             } catch (JSONException e) {
+@@ -370,7 +377,8 @@
+         SharedPreferences pref = context.getSharedPreferences(OSC_PREFERENCE, Activity.MODE_PRIVATE);
+ 
+         for (VirtualControllerElement element : controller.getElements()) {
+-            String prefKey = ""+element.elementId;
++            String prefKey = ""+element.elementId +
++                    ((element instanceof AnalogStick && ((AnalogStick) element).isFloating()) ? "_float" : "");
+ 
+             String jsonConfig = pref.getString(prefKey, null);
+             if (jsonConfig != null) {
+--- a/app/src/main/res/xml/preferences.xml
++++ b/app/src/main/res/xml/preferences.xml
+@@ -152,6 +152,11 @@
+             android:key="checkbox_show_onscreen_controls"
+             android:summary="@string/summary_checkbox_show_onscreen_controls"
+             android:title="@string/title_checkbox_show_onscreen_controls" />
++        <CheckBoxPreference
++            android:key="checkbox_floating_sticks"
++            android:title="@string/title_floating_sticks"
++            android:summary="@string/summary_floating_sticks"
++            android:defaultValue="true" />
+         <CheckBoxPreference
+             android:key="checkbox_vibrate_osc"
+             android:dependency="checkbox_show_onscreen_controls"
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -303,4 +303,6 @@
+     <string name="analogscroll_none">None (both sticks move the mouse)</string>
+     <string name="analogscroll_right">Right analog stick</string>
+     <string name="analogscroll_left">Left analog stick</string>
++    <string name="title_floating_sticks">Floating thumbsticks</string>
++    <string name="summary_floating_sticks">Hide sticks until touched; adjust the touch regions in the on-screen layout editor.</string>
+ </resources>
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -284,4 +284,6 @@
+     <string name="summary_analog_scrolling">在鼠标模式下选择用哪个摇杆控制鼠标移动</string>
+     <string name="summary_seekbar_vibrate_fallback_strength">增强或减弱设备的震动强度</string>
+     <string name="analogscroll_none">默认 (两个摇杆都控制鼠标)</string>
++    <string name="title_floating_sticks">浮动摇杆</string>
++    <string name="summary_floating_sticks">默认隐藏；触摸时从手指落点出现，可在游戏内布局编辑中调整操作区域。</string>
+ </resources>
+\ No newline at end of file
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 322
++        versionCode = 324
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
