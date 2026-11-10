@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "status": "experimental_single_title_pad_smoke_validated",
+  "repository": "https://github.com/jhaizhou-ops/S2Arm",
+  "revision": "93bf8c6cab24934b3fe05af4bc04cba1fec84328",
+  "target": "macos-arm64-headless",
+  "constraints": [
+    "NS2 compatibility is title- and build-specific; an upstream claim is not NXBridge validation.",
+    "The host API header is a draft, so integration must use verified concrete hooks.",
+    "Game assets, keys, saves, generated game modules and shaders stay outside version control.",
+    "Existing nxnative BOTW and TOTK deployments remain separate from this experiment.",
+    "OoT gameplay, checkpoint reload and Pad touch streaming passed bounded smoke tests; sustained FPS, game speed, audio sync and multiplayer capacity remain unvalidated.",
+    "The public launcher uses per-session shader caches; the warm-cache Pad run used a private single-build seeding experiment."
+  ]
+}

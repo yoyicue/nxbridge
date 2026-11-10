@@ -9,6 +9,7 @@
 | Rust 依赖 | [Cargo.lock](../Cargo.lock) 和 `release-dependencies.json`，针对 `aarch64-apple-darwin` 的 Cargo metadata | 234 条 package 记录均有许可表达式；清单含开发和构建依赖。除两个 vendor 包外，registry 源码由构建工具按锁文件下载，不包含在本次源码归档。元数据检查不等于二进制发行物 SBOM 或全部条款审计。 |
 | fec-rs | 2026-11-05 纳入 crates.io `fec-rs` 0.1.0，包内修订 `402f41f970bb8c3ef7c88639821032e3b6460f63`；增加直接矩阵构造与兼容测试 | 保留 BSD-2-Clause 原文。包 SHA-256、改动边界及双 Cargo 入口说明见 [来源声明](../vendor/fec-rs/NXBRIDGE-NOTICE.md)。 |
 | nxnative 游戏引擎与 NX2Apple 构建工具 | 实验组合见 [实验锁](../config/nxb010-experiment-lock.json)：引擎派生提交 `b8d16169c5fb7a3c6a936a950e294b1df4680551`，NX2Apple `41f7d6ba920927856316f6e04af1c50e437eb9c3` | 本机引擎固定修订的 LICENSE 为 MIT，补丁上下文的原版权文本保留于 `adapters/nxnative/LICENSE.upstream`；构建工具及完整运行时不随本版提供。游戏及其资源、密钥、存档不随项目分发。实验构建补丁目前仍在本机忽略目录，锁文件不是完整构建材料。 |
+| S2Arm 实验后端（2026-11-10 新增） | 固定 `93bf8c6cab24934b3fe05af4bc04cba1fec84328`，仅适配源码与补丁；见 [说明](../adapters/s2arm/README.md) | 上游根 Apache-2.0，NVN 部分 MIT；对应文本及 NOTICE 保留在 `adapters/s2arm/`。自有适配 MIT，补丁上下文保留上游许可。完整引擎、第三方库、游戏构建和工具链不随适配分发；尚无二进制发行物。 |
 | Moonlight Android 与 NXBridge 客户端补丁 | 本机实验使用 Moonlight Android `b48494cb96bff23d8886c4775cc4f39a1075495d`；仓库内 `adapters/input/` 有补丁和脚本 | GPL 派生内容和原始上下文保留对应条款，源码范围见 [输入 NOTICE](../adapters/input/NOTICE.md)，GPL 文本见 [LICENSES](../LICENSES/GPL-3.0-only.txt)；本版不分发客户端或其子模块。当前未证明从公开材料重建实验 APK。 |
 | FFmpeg | 合成源调用本机独立 FFmpeg 进程；本机 `ffmpeg -buildconf` 包含 `--enable-gpl` 和 `--enable-version3` | 具体发行物取决于来源与编译选项；本机配置不能代表其他机器。依赖自己的许可和源码交付要求，见 [FFmpeg 法律说明](https://ffmpeg.org/legal.html)。 |
 | Opus 与系统框架 | Rust 依赖及本机原生库；Apple 系统框架 | 以实际链接的版本和分发方式核对声明及再分发条件；尚未完成二进制物料清单。 |

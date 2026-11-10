@@ -36,6 +36,7 @@ NXBridge is an experimental Rust GameStream-compatible server for Apple Silicon 
 | [输入桥迭代需求](docs/input-bridge-requirements.md) | BOTW 五个动作键、采样时序、人工接管与验收 |
 | [虚拟手柄完整优化](docs/virtual-controller-optimization.md) | 触屏交互与 UI、布局编辑与配置、agent 调整、可靠输入及实施验收 |
 | [实验客户端源码构建](docs/moonlight-experimental-build.md) | 固定上游的客户端补丁重放、本机编译和未验证边界 |
+| [S2Arm / NS2 实验后端](adapters/s2arm/README.md) | OoT 离屏游玩、Pad 串流 / 触屏及读档短测已通；稳定 FPS 与游戏时序待验收 |
 | [性能与验收](docs/validation.md) | 测量方法、单实例 / 并发验证门槛 |
 | [Agent 工作流](docs/agent-workflow.md) | 任务领取、证据、评审与恢复上下文 |
 | [当前状态](docs/status.md) | 已知事实、未验证项和下一步 |

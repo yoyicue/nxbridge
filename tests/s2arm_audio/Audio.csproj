@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="../../adapters/s2arm/AudioDriver.cs" />
+    <ProjectReference Include="$(S2ArmRoot)/compat/tree/src/Ryujinx.Audio/Ryujinx.Audio.csproj" />
+  </ItemGroup>
+</Project>

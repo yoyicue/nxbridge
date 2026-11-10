@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-09",
+  "updated_at": "2026-11-10",
   "execution_policy": "single_active_agent_by_default",
   "tasks": [
     {
@@ -1449,6 +1449,64 @@
       ],
       "evidence": [
         "docs/reports/NXB-126.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-127",
+      "title": "接入独立 S2Arm 后端并验证 NS2 游戏",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-010",
+        "NXB-031",
+        "NXB-032",
+        "NXB-115"
+      ],
+      "scope": [
+        "adapters/s2arm/",
+        "tests/",
+        "scripts/",
+        "config/",
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "固定 S2Arm 修订，在独立副本构建，保留现有 BOTW / TOTK 服务与存档",
+        "核实用户提供的 NS2 游戏身份与版本，记录解包、构建和启动的真实结果",
+        "接入独立游戏进程的离屏音画和会话输入，验证释放、隔离与实际串流，明确兼容与帧率边界",
+        "提供可重放的适配、相关回归测试和 make check 结果；不提交游戏资源或本机秘密"
+      ],
+      "evidence": [
+        "docs/reports/NXB-127.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-128",
+      "title": "验证 OoT 持久缓存、游戏时序与串流稳定性",
+      "priority": "P1",
+      "status": "todo",
+      "owner": null,
+      "depends_on": [
+        "NXB-127"
+      ],
+      "scope": [
+        "adapters/s2arm/",
+        "tests/",
+        "scripts/",
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "持久 shader 缓存具有引擎 / 翻译链 / 游戏构建身份、失效与原子发布规则；不会混入其他构建或绕过上游指纹检查",
+        "在记录背景负载的固定路线重复冷 / 热启动与至少 30 分钟观察，分别报告原生呈现、游戏速度、客户端显示及长帧；不以平均 FPS 代替稳定性",
+        "分别记录游戏、服务和编码 worker 物理占用 / 系统 swap，定位冷加载、音频排队与间断；不结束其他用户应用来隐瞒默认负载",
+        "核对 Pad 断开时视频尾部 failed 与音频 bridge_other 的原因，验证有界关停、存档和输入释放；保留 GPU 保护及已知上游失败"
+      ],
+      "evidence": [
+        "docs/reports/NXB-127.md"
       ],
       "blockers": []
     }
