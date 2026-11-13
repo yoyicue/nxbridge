@@ -1,0 +1,106 @@
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index a66eaad..ae9eea5 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -2,6 +2,7 @@
+ #import <Metal/Metal.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <QuartzCore/CAMetalDisplayLink.h>
++#import "nxbridge_video_probe.h"
+ #import <MetalFX/MetalFX.h>
+ #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
+ #import <ImageIO/ImageIO.h>
+@@ -16524,6 +16525,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink
+     // (headless runs never present, and every game before drew into a window texture before presenting it). A commit with nothing new costs nothing
+     res_commit();
++    if (!front_metal_layer()) {
++        nxb_probe_ticket capture;
++        id<MTLTexture> out = nxb_video_probe_claim(g_dev, period, &capture);
++        if (out && !present_offscreen_m4(src, crop, out, ^(int ok) { nxb_video_probe_complete(capture, ok != 0); }))
++            nxb_video_probe_complete(capture, 0);
++    }
+     // DM_NVN_REGLUM=x0,y0,x1,y1:file (normalized coordinates): read back this region on every present and record "present sequence number, present time ns, region mean luminance, subsampled grayscale thumbnail (hex)" (diagnostic: verify that animation speed is independent of frame rate).
+     // A separate command buffer is queued after this frame's rendering (the same queue executes in submit order); does not wait for the GPU and does not disturb frame pacing
+     static int rl = -1; static float rr[4]; static FILE *rlf; static pthread_mutex_t rlmu = PTHREAD_MUTEX_INITIALIZER;
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index 461132f..7b1fc4f 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -80,7 +80,7 @@ endif
+ FORCE:
+ # Makefile: a change to CFLAGS (or the compile line) rebuilds the host
+ dmhost: Makefile $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h pad_switch2_apple.h switch2_proto.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h home_quit.h home_quit_mac.h ctrl_prompt.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
+-	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
++	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface -framework ImageIO -framework UniformTypeIdentifiers
+ clean:   # the host and everything make generates for it (gen/: the profile headers, the game stamp and the libvpx and dav1d builds; dmhost_* and *.dSYM beside them, as in .gitignore)
+ 	rm -rf gen dmhost dmhost_* *.dSYM
+ .PHONY: clean
+diff --git a/dm/host/hle_audio.c b/dm/host/hle_audio.c
+index 99fb4b5..66108ac 100644
+--- a/dm/host/hle_audio.c
++++ b/dm/host/hle_audio.c
+@@ -255,18 +255,21 @@ static void au_open(aout *a) {
+ }
+ // Silent sink: consumes in real time at 48 kHz every 5 ms. When more than 100 ms behind (iOS suspended the whole process in the background, SIGSTOP on the Mac), restart the count from now and do not make up the missed time --
+ // making it up would pull hundreds of times in one go (seconds' worth), releasing all of the game's buffers and logging hundreds of underruns; a suspended console does not play that stretch either
++void nxb_pcm_probe_start(void);
++void nxb_pcm_probe_push(const int16_t *, uint32_t);
+ static void *null_sink(void *p) {
+-    aout *a = p; uint8_t scratch[RATE / 200 * 2 * 8]; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // paces the game's audio in real time
++    aout *a = p; _Alignas(int16_t) uint8_t scratch[RATE / 200 * 2 * 8]; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // paces the game's audio in real time
+     uint64_t bytes = (uint64_t)RATE / 200 * 2 * a->ch, t = now_ns();
+     while (atomic_load_explicit(&a->null_run, memory_order_acquire)) {
+         t += 5000000; uint64_t now = now_ns();
+         if (t > now) usleep((useconds_t)((t - now) / 1000)); else if (now - t > 100000000) t = now;
+         pull(a, scratch, bytes);
++        if (a->id == 0 && a->ch == 2) nxb_pcm_probe_push((const int16_t *)scratch, RATE / 200);
+     }
+     return NULL;
+ }
+ // Backend changes; callers hold g_aos_lock. pull() takes no lock, so joining a sink under it cannot deadlock
+-static void null_start(aout *a) { atomic_store_explicit(&a->hold_device, 1, memory_order_release); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
++static void null_start(aout *a) { if (a->id == 0 && a->ch == 2) nxb_pcm_probe_start(); atomic_store_explicit(&a->hold_device, 1, memory_order_release); atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
+ static void null_stop(aout *a) { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); a->backend = BK_NONE; }
+ static void au_halt(aout *a) {
+     if (a->start_phase == AU_STARTING) a->start_phase = AU_CANCELED;
+diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
+index 764015e..bc9d218 100644
+--- a/dm/host/hle_hid.c
++++ b/dm/host/hle_hid.c
+@@ -8,6 +8,7 @@
+ #include "hle.h"
+ #include "hle_haptics.h"
+ #include "dm_input.h"
++#include "nxbridge_input.h"
+ #include "front.h"
+ #include <stdatomic.h>
+ #include <stdbool.h>
+@@ -587,6 +588,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+         b |= atomic_load(&g_pad_btn[p]) | atomic_exchange(&g_pad_latch[p], 0);
+         uint64_t v = atomic_load(&g_pad_axes[p]); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(v, i));
+     }
++    if (!pl) nxbridge_input_sample(&b, a);
+     if (!pl) {   // the physical sources so far (DM_REC records them, DM_BTN_SHAKE only from player 1's own controller and the keyboard, as shake_note), then the scripted path
+         if (atomic_load_explicit(&g_rec_on, memory_order_relaxed)) rec_read((b & 0xffffull) | ((atomic_load(&g_btn) | atomic_load(&g_pad_btn[0])) & DM_BTN_SHAKE), a);
+         b |= atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
+@@ -604,6 +606,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+     if (s->rx > STICK_THRESH) b |= 1u << 22;
+     if (s->ry < -STICK_THRESH) b |= 1u << 23;
+     s->buttons = b;
++    if (!pl) nxbridge_input_trace(s->buttons, a);
+     s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+ }
+ // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
+diff --git a/dm/host/hle_lifecycle.c b/dm/host/hle_lifecycle.c
+index 53fb4fa..6c69c62 100644
+--- a/dm/host/hle_lifecycle.c
++++ b/dm/host/hle_lifecycle.c
+@@ -17,6 +17,7 @@ void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
+     dm_cheats_exit();                               // a clean exit: no safe mode for the cheats at the next launch (atexit does not run either)
+     dm_audio_suspend(1);
+     dm_gfx_suspend(1);
++    { void nxb_video_probe_shutdown(void); nxb_video_probe_shutdown(); }
+     { int64_t left = 1300 - (int64_t)((now_ns() - t0) / 1000000); dm_gfx_quit(left > 0 ? (int)left : 0); }   // the pipeline archive's unwritten captures, within the 1.5 s
+     LOG("graceful exit done (%.3f s)", (now_ns() - t0) / 1e9);
+     if (then) then(arg);

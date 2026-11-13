@@ -1,0 +1,92 @@
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -226,6 +226,12 @@
+ static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
+ #include "../../../../runtime/include/s2a_qos.h"   // 全进程线程调度档一张表（11-06 Switch2 线 71）
+ #include "../../../../runtime/include/s2a_docs.h"  // 文档根唯一取法（S2A_DOCS，否则 $HOME/Documents）
++typedef struct { uint64_t wall, cpu, frame; } nxb_wait_span;
++static nxb_wait_span nxb_wait_begin(void) { return (nxb_wait_span){clock_gettime_nsec_np(CLOCK_UPTIME_RAW), clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), atomic_load(&g_cur_frame)}; }
++static void nxb_wait_end(const char *kind, nxb_wait_span s) {
++    uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
++    if (end - s.wall >= 10000000ull) MLOG("[nxb-wait] kind=%s start_ns=%llu end_ns=%llu cpu_ns=%llu frame_start=%llu frame_end=%llu thread=%p", kind, (unsigned long long)s.wall, (unsigned long long)end, (unsigned long long)(cpu - s.cpu), (unsigned long long)s.frame, (unsigned long long)atomic_load(&g_cur_frame), (void *)pthread_self());
++}
+ #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
+ #include "nvn_warm.h"   // the prewarm's progress for the host's loading page (s2a_warm_progress)
+ #include "nvn_be.h"
+@@ -2225,6 +2231,7 @@
+ int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
+ 
+ int nvn_be_wait(uint64_t fence, uint64_t timeout_ns) {
++    nxb_wait_span nxb_span = nxb_wait_begin();
+     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+     uint64_t ns = (uint64_t)dl.tv_nsec + (timeout_ns > 3600000000000ull ? 3600000000000ull : timeout_ns);
+     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
+@@ -2234,6 +2241,7 @@
+     int ok = g_done >= fence;
+     pthread_mutex_unlock(&g_mu);
+     if (blk) DM_BLOCK_END();
++    nxb_wait_end("gpu_fence", nxb_span);
+     return ok;
+ }
+ 
+@@ -2749,9 +2757,11 @@
+ static void up_wake(void) { pthread_mutex_lock(&g_up_wmu); pthread_cond_broadcast(&g_up_wcv); pthread_mutex_unlock(&g_up_wmu); }
+ static void up_wait_zero(_Atomic int *v) {
+     if (!atomic_load(v)) return;
++    nxb_wait_span nxb_span = nxb_wait_begin();
+     DM_BLOCK_BEGIN(); pthread_mutex_lock(&g_up_wmu);
+     while (atomic_load(v)) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }
+     pthread_mutex_unlock(&g_up_wmu); DM_BLOCK_END();
++    nxb_wait_end("upload_completion", nxb_span);
+ }
+ static unsigned g_up_seq;
+ #define UP_BLOCK_SIZE (32u * 1024u * 1024u)
+@@ -11994,7 +12004,9 @@
+         rec_commit(g_cb, nil);
+         rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
+     }
++    nxb_wait_span nxb_span = nxb_wait_begin();
+     if (![g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]) RED_ONCE(97, "indirect-count multi-draw: the GPU did not finish within 10 s; the count is read anyway");
++    nxb_wait_end("indirect_gpu_event", nxb_span);
+     main_barrier_reset();
+     if (g_m3) g_cb = rec_cb_new();
+     else {
+--- a/graphics/nvn/gfx/nvn/nvn_rec.h
++++ b/graphics/nvn/gfx/nvn/nvn_rec.h
+@@ -311,10 +311,12 @@
+     if (!g_rlane) geo_run_flush();   // inside a lane (a run's main-pass draw uploading a texture, up_begin): only the stream handed over so far is drained; the lanes are not waited for
+     int lane = g_rlane; g_rlane = 0;
+     if (!g_rb_started) { g_rlane = lane; return; }
++    nxb_wait_span nxb_span = nxb_wait_begin();
+     rec_publish();
+     pthread_mutex_lock(&g_rb_mu);
+     while (g_rb_head || g_rb_busy) pthread_cond_wait(&g_rb_idle, &g_rb_mu);
+     pthread_mutex_unlock(&g_rb_mu);
++    nxb_wait_end("encoding_drain", nxb_span);
+     g_rlane = lane;
+ }
+ static __attribute__((noreturn)) void rec_missing(id o, SEL s) { MDIE("deferred encoding: %s has no stand-in for -%s (DM_NVN_ENC_THREAD=0 runs without it)", object_getClassName(o), sel_getName(s)); }
+--- a/graphics/nvn/gfx/nvn/nvn_xqueue.inc
++++ b/graphics/nvn/gfx/nvn/nvn_xqueue.inc
+@@ -104,15 +104,21 @@
+ }
+ // One piece: replay streams h[0..n) of queue q as a submission; returns 1 if it parked (the rest is in q's entry)
+ static int xq_piece(void *q, const uint64_t *h, int n, const void *state) {
++    nxb_wait_span nxb_enter = nxb_wait_begin();
+     nvn_hle_queue_enter(q);
++    nxb_wait_end("queue_enter", nxb_enter);
+     nvn_be_sub_begin(); nvn_hle_piece_begun(); if (state) xq_state_load(state);
+     nvn_be_sub_index(h, n);
+     g_xq_cur = q; g_xq_unwind = 0; g_xq_nuc = 0; g_xq_ucover = 0;
++    nxb_wait_span nxb_replay = nxb_wait_begin();
+     int i = 0;
+     for (; i < n; i++) { nvn_be_exec_rest(h + i + 1, n - i - 1); nvn_be_exec((const uint8_t *)(uintptr_t)h[i]); if (g_xq_unwind) break; }
+     nvn_be_exec_rest(NULL, 0); g_xq_cur = NULL;
++    nxb_wait_end("replay", nxb_replay);
+     void *st = g_xq_unwind ? xq_state_save() : NULL;
++    nxb_wait_span nxb_commit = nxb_wait_begin();
+     uint64_t fence = nvn_be_sub_commit();
++    nxb_wait_end("submit_commit", nxb_commit);
+     xq_t *e = xq_find(q);
+     if (!g_xq_unwind) { if (e) { xq_publish_owed(e, fence); if (!e->ncont && !e->parked) xq_drop(e); } return 0; }
+     g_xq_unwind = 0;

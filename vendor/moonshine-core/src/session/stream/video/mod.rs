@@ -90,6 +90,12 @@ impl HdrMetadata {
 	}
 }
 
+// Moonshine validates client packet sizes before allocation; retain the guard
+// at both the negotiation and packetizer boundaries.
+pub(crate) fn valid_packet_size(size: usize) -> bool {
+	(200..=65_471).contains(&size)
+}
+
 /// Configuration for the video stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

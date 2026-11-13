@@ -4,10 +4,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <S2ArmAudioSource Condition="'$(S2ArmAudioSource)' == ''">../../adapters/s2arm/AudioDriver.cs</S2ArmAudioSource>
+    <S2ArmAudioTestSource Condition="'$(S2ArmAudioTestSource)' == ''">Program.cs</S2ArmAudioTestSource>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Program.cs" />
-    <Compile Include="../../adapters/s2arm/AudioDriver.cs" />
+    <Compile Include="$(S2ArmAudioTestSource)" />
+    <Compile Include="$(S2ArmAudioSource)" />
     <ProjectReference Include="$(S2ArmRoot)/compat/tree/src/Ryujinx.Audio/Ryujinx.Audio.csproj" />
   </ItemGroup>
 </Project>

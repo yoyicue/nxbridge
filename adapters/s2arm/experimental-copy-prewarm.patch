@@ -1,0 +1,75 @@
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -95,6 +95,7 @@
+ #define GROW(ptr, nbytes, what) grow_((void **)&(ptr), (size_t)(nbytes), what)
+ 
+ static void warm_start(void), warm_announce(void);
++static void nxb_copy_prepare(void);
+ static void warm_claim(void);
+ static void warm_bump(const char *vk, const char *fk);   // 游戏登记着色器程序时把预热清单里这对着色器的管线提到队头（warm_pick）
+ 
+@@ -8345,6 +8346,8 @@
+ }
+ static void warm_start(void) {
+     if (g_warm_started++) return;
++    const char *nxb_copy = getenv("DM_NXB_COPY_PREWARM");
++    if (nxb_copy && !strcmp(nxb_copy, "1") && prepare_on()) nxb_copy_prepare();
+     NSArray<NSString *> *paths = warm_paths(1);
+     if (!paths) return;
+     if (!g_warm_items) g_warm_items = [NSMutableArray array];
+@@ -13410,6 +13413,7 @@
+         default: return 0;
+     }
+ }
++static _Thread_local int nxb_copy_prepare_only;
+ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
+     static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
+@@ -13438,7 +13442,7 @@
+         at = rec_table(tab_new(1, 2, 1, &e));
+         for (int i = 0; i < 2; i++) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = i ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+             sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; sd.supportArgumentBuffers = YES; samp[i] = [g_dev newSamplerStateWithDescriptor:sd]; }
+-        if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("【红】 cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
++        if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { if (!nxb_copy_prepare_only) failed = 1; MLOG("【红】 cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
+         pso = [NSMutableDictionary dictionary];
+     }
+     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
+@@ -13453,6 +13457,7 @@
+         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
+         pso[pk] = ps;
+     }
++    if (nxb_copy_prepare_only) return 1;
+     unsigned sw = MAX(s.width >> sl, 1ul), sh = MAX(s.height >> sl, 1ul), dw = MAX(d.width >> dl, 1ul), dh = MAX(d.height >> dl, 1ul);
+     if ((unsigned)(dr->xoffset + dr->width) > dw || (unsigned)(dr->yoffset + dr->height) > dh) return 0;
+     int nz = sr->depth ? sr->depth : 1;
+@@ -13484,6 +13489,19 @@
+     { static int once[2]; if (!once[depth]++) MLOG("format-converting / scaling texture copy: first case %dx%d format %lu → %dx%d format %lu%s%s", sr->width, sr->height, (unsigned long)s.pixelFormat, dr->width, dr->height, (unsigned long)d.pixelFormat,
+                                                     linear && !depth ? " (bilinear)" : "", stencil ? (scopy ? " (depth + stencil)" : " (no stencil view possible, cleared to 0)") : ""); }
+     return 1;
++}
++// Optional OoT experiment: prepare only the observed colour-copy format on the
++// submit thread, before the game prewarm. No GPU commands or game data are used.
++static void nxb_copy_prepare(void) {
++    @autoreleasepool {
++        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG11B10Float width:1 height:1 mipmapped:NO];
++        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++        id<MTLTexture> t = [g_dev newTextureWithDescriptor:d];
++        if (!t) { MLOG("[nxb-copy-prepare] texture allocation failed; normal first use retained"); return; }
++        NVNcopyRegion region = {0, 0, 0, 1, 1, 1}; uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++        nxb_copy_prepare_only = 1; int ok = copy_t2t_draw(t, t, 0, 0, 0, 0, &region, &region, 1, 0); nxb_copy_prepare_only = 0;
++        MLOG("[nxb-copy-prepare] format=RG11B10Float ready=%d elapsed_ms=%.3f (pipeline only; no GPU copy)", ok, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6);
++    }
+ }
+ // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
+ // S2Arm widen: copies between render targets whose storage tex_widen widened. A copy of the whole game width from one widened storage into another takes the whole widened width
+--- a/nxbridge/launch.py
++++ b/nxbridge/launch.py
+@@ -98,6 +98,8 @@
+         'S2A_AUTOPLAY_OUT': str(run), 'S2A_RUN_ROOT': str(run / 'runtime'),
+         'S2A_MACRO_DUMP': str(run / 'macro'),
+     })
++    # Experimental per-game option; not inherited unless explicitly selected.
++    env['DM_NXB_COPY_PREWARM'] = inherited.get('DM_NXB_COPY_PREWARM', '0')
+     return host, game, save, run, cache_identity, env
+ 
+ 

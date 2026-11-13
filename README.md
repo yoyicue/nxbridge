@@ -10,6 +10,13 @@ NXBridge is an experimental Rust GameStream-compatible server for Apple Silicon 
 
 家庭场景面向 2–3 位玩家。设计按同时独立游玩预留实例隔离，同时支持轮流游玩、各自保存进度。实际并发数量由每台主机的测试结果决定，首轮测试从一个实例开始。
 
+## 当前进展
+
+- 实验游戏库已接入《旷野之息》《王国之泪》和《时之笛》入口。BOTW / TOTK 使用 nxnative，OoT 使用独立适配的 S2Arm 后端；各游戏的兼容性和性能分别验证。
+- 两台实验 Pad 已接入各自的游戏服务、存档和缓存。OoT 已使用存档副本读档，BOTW / TOTK 已验证标题画面；双设备稳定游玩和并发容量仍待验收。
+- Android 实验客户端支持按游戏编辑虚拟手柄布局。客户端 406 修复了浮动摇杆在触摸区域边界被裁切的问题，两台 Pad 已完成布局试按；游戏内实操回归仍待验证。见 [摇杆边界验证](docs/reports/NXB-120-stick-edge.md) 和 [客户端构建](docs/moonlight-experimental-build.md)。
+- OoT 仍观察到长帧与音频间断，不能据此认定卡顿已经解决；最新部署与验证边界见 [上游更新记录](docs/reports/NXB-137.md) 和 [当前状态](docs/status.md)。
+
 ## 目标与技术路线
 
 - 首个游戏：Switch 版 BOTW；首个主机：Apple Silicon Mac mini；首个客户端：Android 平板。
@@ -31,6 +38,7 @@ NXBridge is an experimental Rust GameStream-compatible server for Apple Silicon 
 | [游戏会话服务端设计](docs/game-session-server.md) | Rust 协议、离屏音画输出、服务封装、内存预算与实施阶段 |
 | [Web 管理与多游戏支持](docs/web-management-and-game-library.md) | 管理页面、统一 API、游戏构建与配置、逐游戏验收及产品化顺序 |
 | [多玩家与实例隔离](docs/sessions.md) | 生命周期、存档锁、资源调度、故障恢复 |
+| [存储与清理边界](docs/storage-lifecycle.md) | 持久数据、缓存、会话临时文件及迁移限制 |
 | [输入桥接口草案](docs/input-bridge.md) | 输入路由、释放、重连和体感 |
 | [媒体接口 v1](docs/media-abi-v1.md) | 合成源与游戏源共用的时钟、缓冲与释放契约 |
 | [输入桥迭代需求](docs/input-bridge-requirements.md) | BOTW 五个动作键、采样时序、人工接管与验收 |
@@ -82,10 +90,12 @@ nxbridge/
 ├── crates/
 │   ├── nxbridge-host/         主机与会话管理的源码落点
 │   ├── nxbridge-media/        共用媒体 ABI 与租约管理
-│   └── nxbridge-stream/       GameStream 兼容串流的源码落点
+│   ├── nxbridge-stream/       GameStream 兼容串流的源码落点
+│   └── nxbridge-gamestream/   实验 GameStream 服务端
 ├── adapters/
-│   ├── input/                 已验证的单会话输入原型
-│   └── nxnative/              离屏帧 / PCM 适配的源码与补丁落点
+│   ├── input/                 输入桥与 Moonlight 客户端补丁
+│   ├── nxnative/              nxnative 离屏适配与补丁
+│   └── s2arm/                 S2Arm 实验后端与补丁
 ├── vendor/moonshine-core/      实验协议核心及许可证
 ├── vendor/fec-rs/              固定版本的 FEC 源码及矩阵构造补丁
 ├── tests/                     行为测试与设备探针

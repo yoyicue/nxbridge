@@ -1,2 +1,2 @@
-# Unified-diff context prefixes precede required Makefile recipe tabs.
-adapters/s2arm/integration.patch whitespace=-space-before-tab
+# Unified-diff context prefixes preserve blank lines and Makefile recipe tabs.
+*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

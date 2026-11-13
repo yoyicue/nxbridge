@@ -2,6 +2,7 @@
 """Fail-closed preparation checks; no upstream download or game required."""
 from pathlib import Path
 import subprocess
+import json
 import tempfile
 import unittest
 
@@ -44,6 +45,26 @@ class PrepareTests(unittest.TestCase):
         self.assertIn('output already exists', result.stderr)
         self.assertTrue(output.is_symlink())
         self.assertFalse((self.root / 'missing').exists())
+
+    def test_candidate_revision_still_requires_exact_source(self):
+        lock = json.loads((ROOT / 'config/s2arm-experiment-lock.json').read_text())
+        revision = next(iter(lock['candidate_revisions']))
+        output = self.root / 'candidate'
+        result = subprocess.run(['python3', str(SCRIPT), '--source', str(self.source),
+                                 '--output', str(output), '--revision', revision],
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not match', result.stderr)
+        self.assertFalse(output.exists())
+
+    def test_unlisted_revision_is_rejected(self):
+        output = self.root / 'unlisted'
+        revision = subprocess.check_output(['git', '-C', str(self.source), 'rev-parse', 'HEAD'], text=True).strip()
+        result = subprocess.run(['python3', str(SCRIPT), '--source', str(self.source),
+                                 '--output', str(output), '--revision', revision],
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
 
     def test_wrong_commit_does_not_create_output(self):
         output = self.root / 'new'

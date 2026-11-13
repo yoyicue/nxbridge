@@ -1,0 +1,20 @@
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -14119,6 +14119,7 @@
+     for (;;) {
+         op_hdr h; memcpy(&h, p, sizeof h);
+         if (rec_bad(h)) { rec_bad_red("replay", p, h, list, prev); g_exec_cur = NULL; return; }   // ends this list as its END would; the caller goes on after its CALL
++        nxb_wait_span nxb_op_span = nxb_wait_begin();
+         prev = p;
+         g_exec_cur = p;   // Scan start point of the store lookahead: the operation that ends the render pass (inclusive)
+         if (p == g_defer_pend) { for (int gi = 0; gi < 4; gi++) if (g_defer_slots[gi].active && g_defer_slots[gi].p_end_op == p) g_defer_slots[gi].in_p = 0; g_defer_pend = NULL; }
+@@ -14274,6 +14275,9 @@
+             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a, h.size); break;
+             default: break;
+         }
++        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - nxb_op_span.wall >= 10000000ull) {
++            char label[32]; snprintf(label, sizeof label, "operation_%u", (unsigned)h.op); nxb_wait_end(label, nxb_op_span);
++        }
+         p += h.size;
+     }
+ }

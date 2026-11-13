@@ -1,0 +1,138 @@
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -232,6 +232,9 @@
+     uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+     if (end - s.wall >= 10000000ull) MLOG("[nxb-wait] kind=%s start_ns=%llu end_ns=%llu cpu_ns=%llu frame_start=%llu frame_end=%llu thread=%p", kind, (unsigned long long)s.wall, (unsigned long long)end, (unsigned long long)(cpu - s.cpu), (unsigned long long)s.frame, (unsigned long long)atomic_load(&g_cur_frame), (void *)pthread_self());
+ }
++typedef struct { const char *name; nxb_wait_span span; } nxb_wait_scope;
++static void nxb_scope_finish(nxb_wait_scope *s) { nxb_wait_end(s->name, s->span); }
++#define NXB_SCOPE(label) nxb_wait_scope nxb_scope __attribute__((cleanup(nxb_scope_finish))) = {label, nxb_wait_begin()}
+ #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
+ #include "nvn_warm.h"   // the prewarm's progress for the host's loading page (s2a_warm_progress)
+ #include "nvn_be.h"
+@@ -307,7 +310,7 @@
+ //   改后同局 freed but alive 0、GPU 已分配 1920 MB
+ static void res_add_at_body(id<MTLResource> r, int line);
+ static void res_add_at(id<MTLResource> r, int line) { @autoreleasepool { res_add_at_body(r, line); } }
+-static void res_add_at_body(id<MTLResource> r, int line) {
++static void res_add_at_body(id<MTLResource> r, int line) { NXB_SCOPE("resource_residency");
+     if (!r) return;
+     pthread_mutex_lock(&g_res_mu);
+     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
+@@ -1591,7 +1594,7 @@
+     (void)e; return g_blit;   // see blit_raw
+ }
+ // texture copies / readbacks: barrier if anything came before, and later operations must wait for it too
+-static id<MTL4ComputeCommandEncoder> blit(void) {
++static id<MTL4ComputeCommandEncoder> blit(void) { NXB_SCOPE("blit");
+     id<MTL4ComputeCommandEncoder> e = blit_raw();
+     if (g_blit_ops) blit_barrier();
+     g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // record as "everything written": the next operation always gets a barrier
+@@ -2241,7 +2244,7 @@
+     int ok = g_done >= fence;
+     pthread_mutex_unlock(&g_mu);
+     if (blk) DM_BLOCK_END();
+-    nxb_wait_end("gpu_fence", nxb_span);
++    if (on_sub_thread()) nxb_wait_end("gpu_fence", nxb_span);
+     return ok;
+ }
+ 
+@@ -3794,7 +3797,7 @@
+         static int nl; if (nl++ < 8) MLOG("a pool's first GPU write: %u uncompressed textures taken from its storage are GPU textures from now on", n); }
+     free(ser);
+ }
+-static void pkg_gpu_wrote(const tex_t *t, unsigned level, unsigned layer0, unsigned nlayers, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
++static void pkg_gpu_wrote(const tex_t *t, unsigned level, unsigned layer0, unsigned nlayers, uint32_t x, uint32_t y, uint32_t w, uint32_t h) { NXB_SCOPE("packaged_gpu_wrote");
+     if (!t || !t->serial || !t->mem) return;
+     gpw_mark(t, level, layer0, nlayers, x, y, w, h);   // copy / clear destination: the bytes of this rectangle (see gpw_mark)
+     __unsafe_unretained id o = tex_get(t->serial); if (![o isKindOfClass:[NvPkg class]]) return;
+@@ -3949,7 +3952,7 @@
+     if (n) bcal_copy(t, dst, pk, &ew, elg, todo, n, s);   // 拷不成（没有来源贴图 / 暂存缓冲）也记成已看过：不在每次解析时重试
+     atomic_store(&pe->s_ser, t->serial); atomic_store(&pe->s_r, (__bridge const void *)r); atomic_store(&pe->s_gen, mg);   // mg 取在拷之前：其间的新写下次再看
+ }
+-static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; g_tex_mtl_n++; id<MTLTexture> r = tex_mtl_(ct); if (r && ct && fmt_compressed(ct->d.format)) bcal_sync(ct, r); AP_E(4); return r; }
++static id<MTLTexture> tex_mtl(const tex_t *ct) { NXB_SCOPE("tex_mtl"); AP_B; g_tex_mtl_n++; id<MTLTexture> r = tex_mtl_(ct); if (r && ct && fmt_compressed(ct->d.format)) bcal_sync(ct, r); AP_E(4); return r; }
+ // A sparse texture is bound from its first level whose pages, and those of every smaller level, are all mapped: a view of levels [r, n) samples as with a minimum LOD of r.
+ // The translator drops TEX's LOD clamp and residency predicate, so Monster Hunter Rise's streamed textures were sampled at levels it had not mapped yet; those read 0, which ASTC
+ // decodes as its error colour (magenta clothes on the title screen). Single-layer 2D textures only; the view follows each upload, as the mappings change only with one
+@@ -3967,7 +3970,7 @@
+     pk->vbase = (int)r;
+ }
+ static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
+-static id<MTLTexture> tex_mtl_(const tex_t *ct) {
++static id<MTLTexture> tex_mtl_(const tex_t *ct) { NXB_SCOPE("tex_mtl_inner");
+     tex_t *t = (tex_t *)ct;
+     if (!t || !t->serial) return nil;
+     if (on_sub_thread()) cpu_unc_drop();
+@@ -4386,7 +4389,7 @@
+ // empty, while it still gave every compute dispatch an encoder of its own with a Metal 3 sample buffer attached (Diablo III crashed at frame 670 on the device with it set).
+ // Per-encoder GPU time is DM_NVN_GPUPROF. Setting the old name only reports itself
+ static inline void args_dirty_all(void);
+-static id<MTLComputeCommandEncoder> own_compute(void) {   // a compute encoder of its own (dispatch_own), after the measurement serializer (ser_gate)
++static id<MTLComputeCommandEncoder> own_compute(void) { NXB_SCOPE("own_compute");   // a compute encoder of its own (dispatch_own), after the measurement serializer (ser_gate)
+     ser_gate(); args_dirty_all(); return enc_c_begin(NULL);
+ }
+ void ts_after(void);
+@@ -4516,7 +4519,7 @@
+ static int g_el_w, g_el_h, g_el_draws; static char g_el_key[12];
+ static int enc_label_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ENC_LABEL"); v = e && atoi(e); } return v; }
+ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compressed render targets used by the open pass (see bcrt_attach)
+-static void rp_end(void) { if (!g_rlane) geo_run_flush(); if (g_enc) { AP_B;
++static void rp_end(void) { NXB_SCOPE("render_pass_end"); if (!g_rlane) geo_run_flush(); if (g_enc) { AP_B;
+     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
+         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
+ #ifdef NVN_RT_RANGE_TEST
+@@ -5040,7 +5043,7 @@
+     *tw = t0 ? extent.physical.width : 16384; *th = t0 ? extent.physical.height : 16384;   // no targets: an attachment-less pass can be up to 16384 (bare_dims)
+ }
+ // There are pending clears but no draw in the pass: open a pass once to land the clears
+-static void rp_flush(void) {
++static void rp_flush(void) { NXB_SCOPE("render_pass_flush");
+     int pend = R.clear_d || R.clear_s;
+     for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
+     if (pend && !g_enc && g_cb) rp_begin_ex(1);
+@@ -6724,7 +6727,7 @@
+ }
+ static void sub_cut(void);   // hands the encoded part of the submission to the GPU (segmented submission, below)
+ static void arena_seg_done(uint64_t sf) { pthread_mutex_lock(&g_mu); if (sf > g_seg_done) g_seg_done = sf; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu); }
+-static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) {
++static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) { NXB_SCOPE("arena_alloc");
+     n = (n + 255) & ~(size_t)255; g_arena_seg += n;
+     if (!g_cur_arena || g_cur_arena->used + n > g_cur_arena->len) {
+         pthread_mutex_lock(&g_mu); g_cur_arena = arena_new(n); pthread_mutex_unlock(&g_mu);
+@@ -9361,7 +9364,7 @@
+          (unsigned long long)g_p20_checked, (unsigned long long)g_p20_type, (unsigned long long)g_p20_type_d2d, (unsigned long long)g_p20_cls);
+ }
+ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
+-static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
++static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { NXB_SCOPE("encode_args"); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
+ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
+     if (!sh->arg_len) return 1;   // no argument buffer (shader_args_init)
+     args_sync_dirty();
+@@ -11622,7 +11625,7 @@
+     return 1;
+ }
+ // 双画检查（见 g_fbc）：老路画完的这一笔结果拷出，附件恢复成底，再按 ⑤ 画同一笔，两份逐字节比（GPU 做完后在提交回调里比）
+-static void draw_top(const p_draw *dw, const p_draw_idx *di) {
++static void draw_top(const p_draw *dw, const p_draw_idx *di) { NXB_SCOPE("draw_top");
+     draw(dw, di);
+     if (!g_fbc.pending) return;
+     g_fbc.pending = 0; rp_end();
+@@ -13446,7 +13449,7 @@
+         default: return 0;
+     }
+ }
+-static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
++static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) { NXB_SCOPE("copy_draw");
+     static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
+     int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+@@ -13607,7 +13610,7 @@
+                                       (unsigned long)s.height, (unsigned long)s.sampleCount, dw, dh, (unsigned long)pf, rw, rh);
+     return 1;
+ }
+-static void copy_t2t_(const p_copy_t2t *c) {
++static void copy_t2t_(const p_copy_t2t *c) { NXB_SCOPE("copy_t2t_inner");
+     if (fold_copy_skip(c->src, "texture copy source") || fold_copy_skip(c->dst, "texture copy destination")) return;
+     if (c->src) xv_check(c->src->serial, c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, "texture copy source");
+     rp_flush();   // Land the pending pure-clear render pass first (zero-source candidates only enter the set when the render pass ends); the blit() below would end the render pass anyway

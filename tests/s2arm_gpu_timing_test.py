@@ -27,7 +27,9 @@ def main():
     args = parser.parse_args()
     source = (args.engine / 'graphics/nvn/gfx/nvn/nvn_mtl.m').read_text()
     done = function(source, 'gpu_tag_done')
-    call = 'gpu_tag_done(frame, start, end' + (', submitted' if 'double submitted' in done.split('{')[0] else '') + ');'
+    queue_timing = 'int qi' in done.split('{')[0]
+    call = ('gpu_tag_done(frame, 0, submitted, start, end);' if queue_timing else
+            'gpu_tag_done(frame, start, end' + (', submitted' if 'double submitted' in done.split('{')[0] else '') + ');')
     declarations = re.search(r'^static struct \{.*\} g_gpu\[GRING\];.*$', source, re.M).group(0)
     body = r'''
 #include <assert.h>
@@ -49,10 +51,13 @@ static void mtl_gpu_halt(const char *why) { (void)why; halted = 1; }
 #define CHECK(expr) do { checks++; if (!(expr)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #expr); return 1; } } while(0)
 '''
     body += declarations + '\n'
+    if queue_timing:
+        body += 'static _Atomic uint64_t g_gpu_start_early, g_gpu_qend[2];\n'
     for name in ['gpu_tag_begin', 'gpu_tag_done', 'nvn_be_gpu_ms', 'nvn_be_gpu_span']:
         body += function(source, name) + '\n'
     body += '''static void feedback(uint64_t frame, double submitted, double start, double end, double callback) {
-        now = callback; gpu_tag_begin(frame); ''' + call + '''
+        ''' + ('static uint64_t previous; if (frame != previous) { atomic_store(&g_gpu_qend[0], 0); previous = frame; }' if queue_timing else '') + '''
+        now = submitted; gpu_tag_begin(frame); now = callback; ''' + call + '''
     }
 int main(void) {
     uint64_t t0, t1;
@@ -90,7 +95,12 @@ int main(void) {
     CHECK(!halted && fabs(nvn_be_gpu_ms(1025) - 20) < 0.001);
     CHECK(nvn_be_gpu_span(1025, &t0, &t1));
     CHECK(nvn_be_gpu_ms(1) == -1);
-    printf("S2Arm GPU feedback: %d checks passed; no GPU workload submitted\\n", checks);
+''' + (r'''
+    // Queue timings may overlap: count each GPU interval only once.
+    feedback(2000, 200, 200.1, 200.7, 200.71); CHECK(!halted);
+    feedback(2000, 200, 200.4, 200.9, 200.91);
+    CHECK(!halted && fabs(nvn_be_gpu_ms(2000) - 800) < 0.001);
+''' if queue_timing else '') + '''    printf("S2Arm GPU feedback: %d checks passed; no GPU workload submitted\\n", checks);
     return 0;
 }
 '''

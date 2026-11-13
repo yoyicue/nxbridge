@@ -14,7 +14,9 @@ import sys
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 LOCK = ROOT / 'config/s2arm-experiment-lock.json'
-PIN = json.loads(LOCK.read_text())['revision']
+LOCKED = json.loads(LOCK.read_text())
+PIN = LOCKED['revision']
+PATCHES = {PIN: LOCKED.get('patch', 'integration.patch'), **LOCKED.get('candidate_revisions', {})}
 FILES = (
     ('adapters/input/nxbridge_input.h', 'runtime/include/nxbridge_input.h'),
     ('adapters/input/nxbridge_input.c', 'runtime/src/nxbridge_input.c'),
@@ -30,6 +32,7 @@ FILES = (
     ('adapters/s2arm/gpu_timing.h', 'graphics/nvn/gfx/nvn/nxbridge_gpu_timing.h'),
     ('adapters/s2arm/AudioDriver.cs', 'platform/apple/cs/audio/NXBridgeAudioDriver.cs'),
     ('adapters/s2arm/launch.py', 'nxbridge/launch.py'),
+    ('adapters/s2arm/s2arm_cache.py', 'nxbridge/s2arm_cache.py'),
     ('adapters/s2arm/headless.mk', 'nxbridge/build.mk'),
 )
 
@@ -46,35 +49,41 @@ def adapter_bytes(source):
     return data
 
 
-def manifest(root):
+def manifest(root, revision, patch):
     paths = [target for _, target in FILES]
     paths += git(root, 'diff', '--name-only', capture=True).stdout.splitlines()
     return {
         'schema_version': 1,
-        'upstream_revision': PIN,
-        'patch_sha256': hashlib.sha256((HERE / 'integration.patch').read_bytes()).hexdigest(),
+        'upstream_revision': revision,
+        'patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(),
+        'internal_prewarm_patch_sha256': hashlib.sha256((HERE / 'prewarm-internal-pipelines.patch').read_bytes()).hexdigest(),
         'files': {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sorted(set(paths))},
     }
 
 
-def prepare(source, output):
+def prepare(source, output, revision=PIN):
+    if revision not in PATCHES:
+        raise ValueError('revision is not listed in the S2Arm experiment lock')
     source = source.resolve(strict=True)
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError('output already exists; refusing to overwrite it')
     if not output.parent.is_dir():
         raise ValueError('output parent must already exist')
-    if git(source, 'rev-parse', 'HEAD', capture=True).stdout.strip() != PIN:
+    if git(source, 'rev-parse', 'HEAD', capture=True).stdout.strip() != revision:
         raise ValueError('source HEAD does not match the pinned S2Arm revision')
     # Check local input availability before creating anything. Cloning reads
     # Git objects, so uncommitted upstream work is deliberately not imported.
     for path, _ in FILES:
         adapter_bytes(path)
-    patch = HERE / 'integration.patch'
+    patch = HERE / PATCHES[revision]
     if not patch.is_file():
         raise ValueError('missing integration.patch')
+    prewarm_patch = HERE / 'prewarm-internal-pipelines.patch'
+    if not prewarm_patch.is_file():
+        raise ValueError('missing prewarm-internal-pipelines.patch')
     subprocess.run(['git', 'clone', '--no-hardlinks', '--no-checkout', str(source), str(output)], check=True)
-    git(output, 'checkout', '--detach', PIN)
+    git(output, 'checkout', '--detach', revision)
     git(output, 'apply', '--check', str(patch))
     for source_path, target in FILES:
         dest = output / target
@@ -84,7 +93,9 @@ def prepare(source, output):
         dest.write_bytes(adapter_bytes(source_path))
     (output / 'nxbridge/launch.py').chmod(0o755)
     git(output, 'apply', str(patch))
-    (output / '.nxbridge-s2arm.json').write_text(json.dumps(manifest(output), indent=2) + '\n')
+    git(output, 'apply', '--check', str(prewarm_patch))
+    git(output, 'apply', str(prewarm_patch))
+    (output / '.nxbridge-s2arm.json').write_text(json.dumps(manifest(output, revision, patch), indent=2) + '\n')
     return output
 
 
@@ -92,9 +103,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--revision', default=PIN, choices=PATCHES, help='locked revision; default is the existing daily revision')
     args = parser.parse_args()
     try:
-        output = prepare(args.source, args.output)
+        output = prepare(args.source, args.output, args.revision)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f'Preparation failed: {error}. Any partial output is retained for inspection.', file=sys.stderr)
         return 1

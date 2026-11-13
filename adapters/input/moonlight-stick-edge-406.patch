@@ -1,0 +1,23 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -13,7 +13,7 @@
+         targetSdk 36
+ 
+         versionName "12.2"
+-        versionCode = 405
++        versionCode = 406
+ 
+         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+         ndk.debugSymbolLevel = 'FULL'
+--- a/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
++++ b/app/src/main/java/com/limelight/binding/input/virtual_controller/VirtualController.java
+@@ -148,6 +148,9 @@
+     public VirtualController(final ControllerHandler controllerHandler, FrameLayout layout, final Context context) {
+         this.controllerHandler = controllerHandler;
+         this.frame_layout = layout;
++        // Floating-stick visuals may extend beyond their touch zones. Hit testing
++        // stays bounded by each child, while its active indicator remains visible.
++        this.frame_layout.setClipChildren(false);
+         this.context = context;
+         this.handler = new Handler(Looper.getMainLooper());
+ 

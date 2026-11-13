@@ -49,3 +49,5 @@ acknowledged packet batch; encoded reference frames are never discarded to
 catch up. Both Cargo entry points select the same patched fec-rs package.
 
 The diagnostic `tests/fixtures/input-stage-instrumentation.patch` includes this modified protocol core and follows the same combined license obligations; it is not part of the production runtime.
+
+Selected RTSP hardening was adapted from upstream Moonshine commits [3725d143](https://github.com/hgaiser/moonshine/commit/3725d143e82365ab9d61607c7a444805daa76669), [e0324dc6](https://github.com/hgaiser/moonshine/commit/e0324dc6), [38db59c5](https://github.com/hgaiser/moonshine/commit/38db59c57085865380878db2748cab0bd64008dd), [631e359e](https://github.com/hgaiser/moonshine/commit/631e359ece726daec43c5462dda84b9acadc566c), and the video packet size bounds from [82f3e6a](https://github.com/hgaiser/moonshine/commit/82f3e6a19c7a92e7d85915fad4e21c819181892d). The latter retains an additional direct packetizer check for this fork. These are selective adaptations, not an upgrade of the pinned rgsp-cast core. The upstream BSD-2-Clause license and existing combined GPL distribution policy remain in force.

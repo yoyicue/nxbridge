@@ -200,6 +200,11 @@ impl Packetizer {
 		rtp_timestamp: u32,
 		frame_processing_latency: u16,
 	) -> Result<ShardBatch, ()> {
+		if !super::valid_packet_size(requested_packet_size) {
+			tracing::warn!("Invalid video packet size: {requested_packet_size}");
+			return Err(());
+		}
+
 		// Eagerly read current encryption key and update cipher if rotated.
 		self.maybe_update_cipher();
 
@@ -444,5 +449,27 @@ impl Packetizer {
 	fn get_fec_encoder(&mut self, data: usize, parity: usize) -> Result<Arc<ReedSolomon>, ()> {
 		super::fec_cache::get_encoder(data, parity)
 			.map_err(|error| tracing::warn!("Couldn't create error correction encoder: {error}"))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	#[test]
+	fn invalid_packet_size_rejected_without_sequence_change() {
+		let (_, keys) = tokio::sync::watch::channel(crate::session::SessionKeyData {
+			remote_input_key: vec![0x42; 16],
+			remote_input_key_id: 1,
+		});
+		let mut packetizer = Packetizer::new(false, keys);
+		for size in [0, 16, 199, 65_472, usize::MAX] {
+			let mut sequence = 77;
+			assert!(
+				packetizer
+					.packetize(&[0u8; 4], true, size, 0, 20, 1, &mut sequence, 0, 0)
+					.is_err()
+			);
+			assert_eq!(sequence, 77);
+		}
 	}
 }

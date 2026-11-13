@@ -1,0 +1,94 @@
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -2954,6 +2954,13 @@
+     uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
+     uintptr_t b = MAX(a, p0 + k * pg), c = MIN(e, p0 + (k + 1) * pg); *lo = (const uint8_t *)b; *n = c > b ? c - b : 0;
+ }
++#include "nxbridge_texture_hash_parallel.h"
++typedef struct { const tex_t *texture; uint64_t *hashes; } nxb_tex_page_job;
++static void nxb_hash_texture_page(void *context, uint32_t k) {
++    nxb_tex_page_job *job = context; const uint8_t *lo; size_t size;
++    page_span(job->texture, k, &lo, &size); job->hashes[k] = span_hash(lo, size);
++}
++static int nxb_parallel_hash_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NXB_PARALLEL_HASH"); on = e && !strcmp(e, "1"); } return on; }
+ static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; return t->L.size ? (uint32_t)(((a + t->L.size - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
+ static unsigned tex_layers(const tex_t *t) { return (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1; }   // as pkg_upload_ (a cube array's depth counts layer-faces)
+ // Block-linear storage (Tegra X1): each layer holds its levels one after another; a level is rows of blocks, a block 2^tileH GOBs tall and one GOB (64 bytes x 8 rows of format blocks) wide,
+@@ -3054,21 +3061,38 @@
+     g_up_src_n++; g_up_src_bytes += b - a;
+     return buf;
+ }
++// NXB-129 isolated diagnostic: CPU/wall costs are accumulated separately.
++// This probe does not change hashes, resource contents or synchronization.
++static _Atomic uint64_t nxb_tp_create_ns, nxb_tp_res_ns, nxb_tp_hash_ns, nxb_tp_hash_cpu_ns, nxb_tp_hash_bytes;
++static int nxb_tp_enabled(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NXB_TEX_PROFILE"); on = e && *e && strcmp(e, "0"); } return on; }
++static uint64_t nxb_tp_clock(clockid_t id) { return clock_gettime_nsec_np(id); }
++void nvn_be_nxb_texprofile_take(uint64_t *create, uint64_t *res, uint64_t *hash, uint64_t *hash_cpu, uint64_t *bytes) {
++    *create = atomic_exchange(&nxb_tp_create_ns, 0); *res = atomic_exchange(&nxb_tp_res_ns, 0);
++    *hash = atomic_exchange(&nxb_tp_hash_ns, 0); *hash_cpu = atomic_exchange(&nxb_tp_hash_cpu_ns, 0); *bytes = atomic_exchange(&nxb_tp_hash_bytes, 0);
++}
+ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph) {
++    int nxb_tp = nxb_tp_enabled(); uint64_t nxb_t0 = nxb_tp ? nxb_tp_clock(CLOCK_UPTIME_RAW) : 0;
+     MTLTextureDescriptor *d = tex_desc(t, 1);
+     if (!d) return nil;
+     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
+                         ? reuse : [g_dev newTextureWithDescriptor:d];
++    if (nxb_tp) atomic_fetch_add(&nxb_tp_create_ns, nxb_tp_clock(CLOCK_UPTIME_RAW) - nxb_t0);
+     if (!mt) { RED_ONCE(2, "failed to create MTLTexture ser=%llu %ux%u format %#x target %d samples %d levels %u", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.target, t->d.samples, t->d.levels); return nil; }
+     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
++    if (nxb_tp) nxb_t0 = nxb_tp_clock(CLOCK_UPTIME_RAW);
+     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
++    if (nxb_tp) atomic_fetch_add(&nxb_tp_res_ns, nxb_tp_clock(CLOCK_UPTIME_RAW) - nxb_t0);
+     int sparse = t->pool && nvn_sparse_pool(t->pool);
+     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
+         if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size);
+         *stamp = nvn_dirty_now();
+         if (ph && !sparse) {   // after the stamp, before the read: a write in between is after the stamp too, so the next check sees its page (and the hash may hold it, the upload does)
+             uint32_t n = page_count(t); uint64_t *h = realloc(*ph, (size_t)MAX(n, 1u) * sizeof *h);
+-            if (h) { for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(t, k, &lo, &m); h[k] = span_hash(lo, m); } *ph = h; *nph = n; } else { free(*ph); *ph = NULL; *nph = 0; } } }
++            if (h) { uint64_t nxb_w = nxb_tp ? nxb_tp_clock(CLOCK_UPTIME_RAW) : 0, nxb_c = nxb_tp ? nxb_tp_clock(CLOCK_THREAD_CPUTIME_ID) : 0, nxb_bytes = 0;
++                if (nxb_parallel_hash_on()) { nxb_tex_page_job job = {t, h}; nxb_hash_pages(n, &job, nxb_hash_texture_page); nxb_bytes = t->L.size; }
++                else { for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(t, k, &lo, &m); h[k] = span_hash(lo, m); nxb_bytes += m; } }
++                if (nxb_tp) { atomic_fetch_add(&nxb_tp_hash_ns, nxb_tp_clock(CLOCK_UPTIME_RAW) - nxb_w); atomic_fetch_add(&nxb_tp_hash_cpu_ns, nxb_tp_clock(CLOCK_THREAD_CPUTIME_ID) - nxb_c); atomic_fetch_add(&nxb_tp_hash_bytes, nxb_bytes); }
++                *ph = h; *nph = n; } else { free(*ph); *ph = NULL; *nph = 0; } } }
+     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
+     uint32_t upf; int ubpp = 0, unp = fmt_unpack(t->d.format, &upf, &ubpp);   // stored in another format (fmt_unpack: BC on a GPU without BC, or expanded): deswizzle, then convert on the CPU; the staging area is sized for the converted data
+--- a/graphics/nvn/gfx/nvn/hle_nvn.c
++++ b/graphics/nvn/gfx/nvn/hle_nvn.c
+@@ -3539,6 +3539,10 @@
+         trow(f, "@mprotect_calls", (double)(mc_ - pmc)); trow(f, "@mprotect_pages", (double)(mpg_ - pmp)); trow(f, "@mprotect_ms", (mn_ - pmn) / 1e6); pmc = mc_; pmp = mpg_; pmn = mn_;
+         double up_ms = nvn_be_upload_ns_take() / 1e6; trow(f, "@upload_ms", up_ms);
+         trow(f, "@upload_gpu_ms", nvn_be_upload_gpu_ns_take() / 1e6);
++        { extern void nvn_be_nxb_texprofile_take(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
++          uint64_t create, res, hash, hash_cpu, bytes; nvn_be_nxb_texprofile_take(&create, &res, &hash, &hash_cpu, &bytes);
++          trow(f, "@tex_create_ms", create / 1e6); trow(f, "@tex_residency_ms", res / 1e6);
++          trow(f, "@tex_hash_ms", hash / 1e6); trow(f, "@tex_hash_cpu_ms", hash_cpu / 1e6); trow(f, "@tex_hash_bytes", (double)bytes); }
+         // Accounting: number of synchronous creations on the submit thread this frame + a timestamp on the same clock as UIMSG (offline, frames are split into front end / loading / in-run by the loading screen intervals)
+         static uint64_t plib, ppso; uint64_t lib_, pso_; nvn_be_create_stats(&lib_, &pso_);
+         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
+--- a/graphics/nvn/tests/t_nvn_pkg_sub.m
++++ b/graphics/nvn/tests/t_nvn_pkg_sub.m
+@@ -16,7 +16,7 @@
+ int s2a_direct_fault(void *addr, int is_write, void *uctx);
+ static NVNdevice device; static NVNqueue queue; static NVNmemoryPool pool; static NVNtexturePool tpool;
+ static uint8_t *memory; static unsigned checks, fails;
+-enum { POOL_SIZE = 16 << 20, TEX_OFF = 5 << 20, TEX_BYTES = 1 << 16, OUT_OFF = 4 << 20 };
++enum { POOL_SIZE = 16 << 20, TEX_OFF = 5 << 20, TEX_BYTES = 1 << 22, OUT_OFF = 4 << 20 };
+ #define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "FAIL setup %s:%d %s\n", __FILE__, __LINE__, #x); exit(2); } } while (0)
+ #define VERIFY(c, ...) do { checks++; int ok_ = !!(c); if (!ok_) fails++; printf("%s ", ok_ ? "PASS" : "FAIL"); printf(__VA_ARGS__); putchar('\n'); fflush(stdout); } while (0)
+ static void *api(const char *name) { void *p = h_nvnBootstrapLoader(name); REQUIRE(p); return p; }
+@@ -43,10 +43,10 @@
+     REQUIRE(API(nvnMemoryPoolInitialize)(&pool, &pb));
+     REQUIRE(API(nvnTexturePoolInitialize)(&tpool, &pool, 1 << 20, 512));
+     NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device); API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D);
+-    API(nvnTextureBuilderSetSize2D)(&b, 16, 16); API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8); API(nvnTextureBuilderSetLevels)(&b, 1);
++    API(nvnTextureBuilderSetSize2D)(&b, 1024, 1024); API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8); API(nvnTextureBuilderSetLevels)(&b, 1);
+     API(nvnTextureBuilderSetStorage)(&b, &pool, TEX_OFF); NVNtexture t = {0}; REQUIRE(API(nvnTextureInitialize)(&t, &b));
+-    static uint8_t px[16 * 16 * 4]; memset(px, 0x40, sizeof px);
+-    NVNcopyRegion r = {0, 0, 0, 16, 16, 1}; API(nvnTextureWriteTexels)(&t, NULL, &r, px);   // CPU 写过 → 打包贴图（按客体内存上传、跟踪脏页）
++    static uint8_t px[1024 * 1024 * 4]; memset(px, 0x40, sizeof px);
++    NVNcopyRegion r = {0, 0, 0, 1024, 1024, 1}; API(nvnTextureWriteTexels)(&t, NULL, &r, px);   // CPU 写过 → 打包贴图（按客体内存上传、跟踪脏页）
+     API(nvnTexturePoolRegisterTexture)(&tpool, 0, &t, NULL);
+     NSError *err = nil; MTLCompileOptions *o = [MTLCompileOptions new]; o.languageVersion = MTLLanguageVersion2_3;
+     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct Args { texture2d<float> t [[id(0)]]; device float4 *out [[id(1)]]; };\n"

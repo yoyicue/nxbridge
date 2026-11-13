@@ -24,6 +24,43 @@ use crate::session::stream::video::VideoFormat;
 use crate::session::stream::video::VideoStreamConfig;
 use crate::session::stream::video::VideoStreamContext;
 
+// Adapted from Moonshine commits 3725d143, e0324dc6, 38db59c5 and
+// 631e359e. Preserve bounds across all partial reads of one request.
+const MAX_RTSP_REQUEST_BYTES: usize = 64 * 1024;
+const RTSP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn rtsp_request_fits(current: usize, incoming: usize) -> bool {
+	current
+		.checked_add(incoming)
+		.is_some_and(|size| size <= MAX_RTSP_REQUEST_BYTES)
+}
+
+fn video_bitrate_bps(kbps: usize) -> Option<usize> {
+	kbps.checked_mul(1_000).filter(|bps| u32::try_from(*bps).is_ok())
+}
+
+fn replace_bytes(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+	let mut result = Vec::with_capacity(haystack.len());
+	let mut rest = haystack;
+	while let Some(position) = rest.windows(from.len()).position(|window| window == from) {
+		result.extend_from_slice(&rest[..position]);
+		result.extend_from_slice(to);
+		rest = &rest[position + from.len()..];
+	}
+	result.extend_from_slice(rest);
+	result
+}
+
+async fn read_rtsp_chunk<R: tokio::io::AsyncRead + Unpin>(
+	reader: &mut R,
+	buffer: &mut [u8],
+	deadline: tokio::time::Instant,
+) -> std::io::Result<usize> {
+	tokio::time::timeout_at(deadline, reader.read(buffer))
+		.await
+		.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "RTSP request deadline exceeded"))?
+}
+
 #[repr(u8)]
 enum ServerCapabilities {
 	_TouchEvents = 0x01,
@@ -315,28 +352,39 @@ impl RtspServer {
 				return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
 			},
 		};
-		let fps = match get_sdp_attribute(&sdp_session, "x-nv-video[0].maxFPS") {
+		let fps: u32 = match get_sdp_attribute(&sdp_session, "x-nv-video[0].maxFPS") {
 			Ok(fps) => fps,
 			Err(()) => {
 				tracing::warn!("Failed to parse xx-nv-video[0].maxFPS in SDP session.");
 				return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
 			},
 		};
-		let packet_size = match get_sdp_attribute(&sdp_session, "x-nv-video[0].packetSize") {
+		if fps == 0 {
+			tracing::warn!("Rejected zero client video frame rate");
+			return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
+		}
+		let packet_size: usize = match get_sdp_attribute(&sdp_session, "x-nv-video[0].packetSize") {
 			Ok(packet_size) => packet_size,
 			Err(()) => {
 				tracing::warn!("Failed to parse x-nv-video[0].packetSize in SDP session.");
 				return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
 			},
 		};
-		let mut bitrate = match get_sdp_attribute(&sdp_session, "x-ml-video.configuredBitrateKbps") {
+		if !crate::session::stream::video::valid_packet_size(packet_size) {
+			tracing::warn!("Rejected invalid client video packet size: {packet_size}");
+			return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
+		}
+		let bitrate_kbps: usize = match get_sdp_attribute(&sdp_session, "x-ml-video.configuredBitrateKbps") {
 			Ok(bitrate) => bitrate,
 			Err(()) => {
 				tracing::warn!("Failed to parse x-ml-video.configuredBitrateKbps in SDP session.");
 				return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
 			},
 		};
-		bitrate *= 1000; // Convert from kbps to bps.
+		let Some(bitrate) = video_bitrate_bps(bitrate_kbps) else {
+			tracing::warn!("Client video bitrate overflows the encoder: {bitrate_kbps} kbps");
+			return rtsp_response(cseq, request.version(), rtsp_types::StatusCode::BadRequest);
+		};
 		let minimum_fec_packets = match get_sdp_attribute(&sdp_session, "x-nv-vqos[0].fec.minRequiredFecPackets") {
 			Ok(minimum_fec_packets) => minimum_fec_packets,
 			Err(()) => {
@@ -526,28 +574,29 @@ impl RtspServer {
 			},
 		}
 
-		let mut message_buffer = String::new();
+		let mut message_buffer = Vec::new();
+		let deadline = tokio::time::Instant::now() + RTSP_REQUEST_TIMEOUT;
 
 		let message = loop {
 			let mut buffer = [0u8; 2048];
-			let bytes_read = connection
-				.read(&mut buffer)
+			let bytes_read = read_rtsp_chunk(&mut connection, &mut buffer, deadline)
 				.await
 				.map_err(|e| tracing::warn!("Failed to read from connection '{}': {}", address, e))?;
 			if bytes_read == 0 {
 				tracing::warn!("Received empty RTSP request.");
 				return Ok(());
 			}
-			message_buffer.push_str(
-				std::str::from_utf8(&buffer[..bytes_read])
-					.map_err(|e| tracing::warn!("Failed to convert message to string: {e}"))?,
-			);
+			if !rtsp_request_fits(message_buffer.len(), bytes_read) {
+				tracing::warn!("Rejected RTSP request over {MAX_RTSP_REQUEST_BYTES} bytes from {address}");
+				return Err(());
+			}
+			message_buffer.extend_from_slice(&buffer[..bytes_read]);
 
 			// Hacky workaround to fix rtsp_types parsing SETUP/PLAY requests from Moonlight.
-			let message_buffer = message_buffer.replace("streamid", "rtsp://localhost?streamid");
-			let message_buffer = message_buffer.replace("PLAY /", "PLAY rtsp://localhost/");
+			let message_buffer = replace_bytes(&message_buffer, b"streamid", b"rtsp://localhost?streamid");
+			let message_buffer = replace_bytes(&message_buffer, b"PLAY /", b"PLAY rtsp://localhost/");
 
-			tracing::trace!("Request: {}", message_buffer);
+			tracing::trace!("Request: {}", String::from_utf8_lossy(&message_buffer));
 			let result = rtsp_types::Message::parse(&message_buffer);
 
 			break match result {
@@ -644,4 +693,144 @@ fn get_sdp_attribute<F: FromStr>(sdp_session: &sdp_types::Session, attribute: &s
 		.trim()
 		.parse()
 		.map_err(|_| tracing::warn!("Attribute {attribute} can't be parsed."))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	#[test]
+	fn bounds_and_byte_normalization() {
+		assert!(rtsp_request_fits(MAX_RTSP_REQUEST_BYTES - 2048, 2048));
+		assert!(!rtsp_request_fits(MAX_RTSP_REQUEST_BYTES, 1));
+		assert!(!rtsp_request_fits(usize::MAX, 1));
+		assert_eq!(
+			replace_bytes(&[0xff, b'P', b'L', b'A', b'Y', b' ', b'/'], b"PLAY /", b"X"),
+			[0xff, b'X']
+		);
+		assert_eq!(
+			replace_bytes(b"streamid=0", b"streamid", b"rtsp://localhost?streamid"),
+			b"rtsp://localhost?streamid=0"
+		);
+		assert_eq!(video_bitrate_bps(5_000), Some(5_000_000));
+		assert_eq!(video_bitrate_bps((u32::MAX as usize) / 1_000 + 1), None);
+		assert_eq!(video_bitrate_bps(usize::MAX), None);
+	}
+	#[tokio::test]
+	async fn fragmented_rtsp_request_reaches_real_handler() {
+		use crate::session::{SessionContext, SessionKeys};
+		let shutdown = ShutdownManager::new();
+		let video = VideoStreamConfig {
+			port: 0,
+			..Default::default()
+		};
+		let audio = AudioStreamConfig { port: 0 };
+		let control = ControlStreamConfig { port: 0 };
+		let manager = SessionManager::new(
+			video.clone(),
+			audio.clone(),
+			control.clone(),
+			"127.0.0.1".into(),
+			5,
+			shutdown,
+		)
+		.unwrap();
+		manager
+			.initialize_session(SessionContext {
+				application_id: 1,
+				resolution: (1280, 720),
+				refresh_rate: 30,
+				keys: SessionKeys::new(vec![0x42; 16], 1),
+				audio_channels: AudioChannels::Stereo,
+				audio_channel_mask: 3,
+				hdr: false,
+			})
+			.await
+			.unwrap();
+		let server = RtspServer {
+			address: "127.0.0.1".into(),
+			rtsp_port: 0,
+			video_config: video,
+			audio_config: audio,
+			control_config: control,
+			session_manager: manager.clone(),
+		};
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+		let (peer, address) = listener.accept().await.unwrap();
+		let handler = server.clone();
+		let task = tokio::spawn(async move { server.handle_connection(peer, address).await });
+		let message = "OPTIONS rtsp://localhost/ RTSP/1.0\r\nCSeq: 7\r\nX-Name: 中文\r\n\r\n".as_bytes();
+		let split = message.iter().position(|b| *b >= 0x80).unwrap() + 1;
+		client.write_all(&message[..split]).await.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+		client.write_all(&message[split..]).await.unwrap();
+		let mut response = Vec::new();
+		tokio::time::timeout(std::time::Duration::from_secs(3), client.read_to_end(&mut response))
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(String::from_utf8_lossy(&response).starts_with("RTSP/1.0 200"));
+		assert!(String::from_utf8_lossy(&response).contains("CSeq: 7"));
+		task.await.unwrap().unwrap();
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+		let (peer, address) = listener.accept().await.unwrap();
+		let overflow_handler = handler.clone();
+		let overflow = tokio::spawn(async move { overflow_handler.handle_connection(peer, address).await });
+		let mut request = b"OPTIONS rtsp://localhost/ RTSP/1.0\r\nCSeq: 7\r\nX-Fill: ".to_vec();
+		request.resize(MAX_RTSP_REQUEST_BYTES + 2048, b'a');
+		let _ = client.write_all(&request).await; // Rejection may close the socket during the write.
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_secs(3), overflow)
+				.await
+				.unwrap()
+				.unwrap()
+				.is_err()
+		);
+		manager.launch_session().await.unwrap();
+		let announce = |fps: &str, packet: &str, bitrate: &str| {
+			let sdp = format!(
+				"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=GameStream\r\nt=0 0\r\n\
+                a=x-nv-video[0].clientViewportWd:1280\r\na=x-nv-video[0].clientViewportHt:720\r\n\
+                a=x-nv-video[0].maxFPS:{fps}\r\na=x-nv-video[0].packetSize:{packet}\r\n\
+                a=x-ml-video.configuredBitrateKbps:{bitrate}\r\na=x-nv-vqos[0].fec.minRequiredFecPackets:0\r\n\
+                a=x-nv-vqos[0].qosTrafficType:0\r\na=x-nv-vqos[0].bitStreamFormat:0\r\n\
+                a=x-nv-aqos.packetDuration:5\r\na=x-nv-aqos.qosTrafficType:0\r\n"
+			);
+			rtsp_types::Request::builder(Method::Announce, rtsp_types::Version::V1_0).build(sdp.into_bytes())
+		};
+		for req in [
+			announce("0", "1400", "5000"),
+			announce("30", "16", "5000"),
+			announce("30", "1400", &usize::MAX.to_string()),
+		] {
+			assert_eq!(
+				handler.handle_announce_request(&req, 8).await.status(),
+				rtsp_types::StatusCode::BadRequest
+			);
+		}
+		assert_eq!(
+			handler
+				.handle_announce_request(&announce("30", "1400", "5000"), 9)
+				.await
+				.status(),
+			rtsp_types::StatusCode::Ok
+		);
+		manager.stop_session().await.unwrap();
+	}
+	#[tokio::test]
+	async fn partial_reads_share_one_deadline() {
+		let (mut reader, mut writer) = tokio::io::duplex(16);
+		writer.write_all(b"RT").await.unwrap();
+		let mut buffer = [0u8; 16];
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
+		assert_eq!(read_rtsp_chunk(&mut reader, &mut buffer, deadline).await.unwrap(), 2);
+		assert_eq!(
+			read_rtsp_chunk(&mut reader, &mut buffer, deadline)
+				.await
+				.unwrap_err()
+				.kind(),
+			std::io::ErrorKind::TimedOut
+		);
+	}
 }

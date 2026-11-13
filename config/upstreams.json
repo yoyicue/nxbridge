@@ -67,5 +67,31 @@
         "Hardware decoder availability is not a measured latency result"
       ]
     }
-  ]
+  ],
+  "latest_audit": {
+    "checked_at": "2026-11-13",
+    "status": "read_only_observations_not_runtime_locks",
+    "components": {
+      "nxnative": {
+        "reference": "main",
+        "revision": "8d44aaf8f3a59eb0e0f63ced14b3f7f26e903484",
+        "result": "Original adapter patches do not apply; a new isolated adapter patch replays and C audio/input/lifecycle syntax checks pass. Metal build blocked by the local SDK; no production engine installed."
+      },
+      "nx2apple": {
+        "reference": "v1.4.0",
+        "revision": "97ba00eb64e60037e173856197dce291b38bb3b3",
+        "result": "Release reports updated engine and removal of its .NET dependency; NXBridge compatibility unverified."
+      },
+      "sunshine": {
+        "reference": "master",
+        "revision": "f1868133b2308a1486624fc9d561b9e58cdf8cb4",
+        "result": "New preview supports macOS gamepads via a licensed signed virtual HID broker; per-session isolation unvalidated."
+      },
+      "moonshine": {
+        "reference": "main",
+        "revision": "7e214670e855f6faa6e01f02b849c27adb4a9161",
+        "result": "Selected RTSP request and video negotiation guards adapted to rgsp-cast-derived core; loopback and one isolated 1402 Moonlight readback passed. Not a wholesale dependency upgrade or daily deployment."
+      }
+    }
+  }
 }

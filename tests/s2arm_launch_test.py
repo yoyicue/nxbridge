@@ -54,25 +54,96 @@ class LaunchTests(unittest.TestCase):
 
     def command(self): return [sys.executable, str(SCRIPT), '--engine', str(self.engine), str(self.game)]
 
+    def test_internal_prewarm_requires_matching_game_build(self):
+        _, _, _, _, identity, default = self.plan()
+        self.assertEqual(default['DM_NXB_COPY_PREWARM'], '0')
+        self.assertEqual(default['DM_NXB_TENSOR_PREWARM'], '0')
+        enabled = {**self.env, 'DM_NXB_COPY_PREWARM': '1', 'DM_NXB_TENSOR_PREWARM': '1',
+                   'DM_NXB_PREWARM_GAME_SHA256': launch.s2arm_cache.game_key(identity)}
+        _, _, _, _, _, actual = self.plan(enabled)
+        self.assertEqual(actual['DM_NXB_COPY_PREWARM'], '1')
+        self.assertEqual(actual['DM_NXB_TENSOR_PREWARM'], '1')
+        # A replaced game build must disable both warmups without blocking play.
+        (self.game / 'main.patched.bin').write_bytes(b'updated game build')
+        _, _, _, _, _, fallback = self.plan(enabled)
+        self.assertEqual(fallback['DM_NXB_COPY_PREWARM'], '0')
+        self.assertEqual(fallback['DM_NXB_TENSOR_PREWARM'], '0')
+
+    def test_internal_prewarm_requires_explicit_identity(self):
+        env = {**self.env, 'DM_NXB_COPY_PREWARM': '1'}
+        _, _, _, _, _, actual = self.plan(env)
+        self.assertEqual(actual['DM_NXB_COPY_PREWARM'], '0')
+        self.assertEqual(actual['DM_NXB_TENSOR_PREWARM'], '0')
+
     def test_private_paths_and_input_identity(self):
         env = {**self.env, 'S2A_SAVE_DIR': '/another-player', 'S2A_AUTOPLAY': '1',
-               'NXGAL_SHADER_CACHE_DIR': '/shared', 'DM_CHEATS': '1', 'DM_WINDOW': '1'}
-        _, _, _, run, actual = self.plan(env)
+               'NXGAL_SHADER_CACHE_DIR': '/shared', 'DM_CHEATS': '1', 'DM_WINDOW': '1',
+               'DM_PSO_USER': '/foreign/pipelines', 'DM_PSO_BG_THREADS': '999',
+               'DM_PSO_MANIFEST': '/foreign/seed', 'DM_PSO_FU_YIELD': '0'}
+        _, _, _, run, identity, actual = self.plan(env)
         self.assertEqual(actual['S2A_SAVE_DIR'], '')
         self.assertEqual(actual['S2A_RYU_DATA'], str(self.save.resolve() / 'ryu'))
         self.assertEqual(actual['S2A_GAME_DATA'], str(self.game.resolve()))
         self.assertEqual(actual['S2A_AUTOPLAY'], '0')
         self.assertEqual(actual['S2A_DOCS'], str(run))
-        self.assertEqual(actual['NXGAL_SHADER_CACHE_DIR'], str(run / 'gal'))
+        cache = launch.s2arm_cache.location(self.work.resolve(), identity)
+        self.assertEqual(actual['NXGAL_SHADER_CACHE_DIR'], str(cache / 'gal'))
+        self.assertEqual(actual['DM_MSL_FALLBACK'], str(cache / 'shaders'))
+        self.assertEqual(actual['DM_PSO_USER'], str(cache / 'pso_user.tsv'))
+        self.assertEqual(actual['DM_PSO_PREPARE_MAX_MS'], '15000')
+        self.assertEqual(actual['DM_PSO_BG_THREADS'], '2')
+        self.assertEqual(actual['DM_PSO_FU_YIELD'], '1')
+        self.assertNotIn('DM_PSO_MANIFEST', actual)
         self.assertNotIn('DM_CHEATS', actual)
         self.assertNotIn('DM_WINDOW', actual)
         self.assertEqual(actual['NXBRIDGE_INPUT_TOKEN'], env['NXBRIDGE_INPUT_TOKEN'])
         self.assertEqual(actual['NXB_SESSION_ID'], env['NXB_SESSION_ID'])
 
+    def test_opt_in_prewarm_deadline_is_bounded(self):
+        actual = self.plan({**self.env, 'DM_NXB_PSO_PREPARE_MAX_MS': '120000'})[-1]
+        self.assertEqual(actual['DM_PSO_PREPARE_MAX_MS'], '120000')
+        self.assertNotIn('DM_NXB_PSO_PREPARE_MAX_MS', actual)
+        for value in ('0', '14999', '120001', '-1', 'foo', '1.5'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'PREPARE_MAX_MS'):
+                self.plan({**self.env, 'DM_NXB_PSO_PREPARE_MAX_MS': value})
+
     def test_overlap_and_symlink_alias_are_rejected(self):
         alias = self.root / 'alias'; alias.symlink_to(self.save)
         for path in (self.save, alias, self.root):
             with self.assertRaises(ValueError): self.plan(work=path)
+
+    def test_explicit_cache_is_separate_and_rejects_overlaps(self):
+        cache = self.root / 'cache'; cache.mkdir()
+        _, _, _, _, identity, actual = self.plan({**self.env, 'DM_CACHE': str(cache)})
+        expected = launch.s2arm_cache.location(cache.resolve(), identity)
+        self.assertEqual(actual['DM_PSO_USER'], str(expected / 'pso_user.tsv'))
+        self.assertNotIn('DM_CACHE', actual)
+        alias = self.root / 'cache-alias'; alias.symlink_to(self.work)
+        for path in (self.save, self.work, self.game, self.engine, self.root, alias):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'DM_CACHE'):
+                self.plan({**self.env, 'DM_CACHE': str(path)})
+        for value in ('', 'relative', str(self.root / 'missing')):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'DM_CACHE'):
+                self.plan({**self.env, 'DM_CACHE': value})
+
+    def test_explicit_cache_is_locked_across_distinct_work_directories(self):
+        cache = self.root / 'cache'; cache.mkdir()
+        other_work = self.root / 'other-work'; other_work.mkdir()
+        other_save = self.root / 'other-save'; other_save.mkdir()
+        first_env = {**self.env, 'DM_CACHE': str(cache)}
+        first = subprocess.Popen(self.command(), env=first_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            for _ in range(100):
+                if list(self.work.glob('s2arm-*/cache.json')): break
+                if first.poll() is not None: self.fail(first.communicate()[1].decode())
+                time.sleep(.02)
+            else: self.fail('cache was not acquired')
+            other = {**first_env, 'DM_SAVE': str(other_save), 'DM_TEMP': str(other_work), 'NXB_VIDEO_GENERATION': '2'}
+            result = subprocess.run(self.command(), env=other, capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((other_save / 'ryu').exists())
+        finally:
+            first.terminate(); first.communicate(timeout=3)
 
     def test_session_identity_required(self):
         for changes in ({'NXB_SESSION_ID': ''}, {'NXB_SESSION_ID': '0' * 32},
@@ -87,6 +158,7 @@ class LaunchTests(unittest.TestCase):
         second = self.plan({**self.env, 'NXB_VIDEO_GENERATION': '2'})[-1]
         self.assertEqual(first['S2A_RYU_DATA'], second['S2A_RYU_DATA'])
         self.assertNotEqual(first['S2A_DOCS'], second['S2A_DOCS'])
+        self.assertEqual(first['DM_PSO_USER'], second['DM_PSO_USER'])
         self.assertEqual((Path(second['S2A_RYU_DATA']) / 'save-fixture').read_bytes(), b'persistent synthetic save')
         other = self.root / 'other-player'; other.mkdir()
         self.assertNotEqual(first['S2A_RYU_DATA'], self.plan(save=other)[-1]['S2A_RYU_DATA'])
@@ -152,14 +224,14 @@ class LaunchTests(unittest.TestCase):
         first = subprocess.Popen(self.command(), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
             for _ in range(100):
-                if list(self.work.iterdir()): break
+                if list(self.work.glob('s2arm-*')): break
                 if first.poll() is not None: self.fail(first.communicate()[1].decode())
                 time.sleep(.02)
             else: self.fail('synthetic launcher did not start')
             other_env = {**self.env, 'NXB_VIDEO_GENERATION': '2'}
             second = subprocess.run(self.command(), env=other_env, capture_output=True, text=True, timeout=5)
             self.assertNotEqual(second.returncode, 0)
-            self.assertEqual(len(list(self.work.iterdir())), 1)
+            self.assertEqual(len(list(self.work.glob('s2arm-*'))), 1)
         finally:
             first.terminate(); first.communicate(timeout=3)
         # Same generation cannot overwrite its previous diagnostic directory.
@@ -169,11 +241,28 @@ class LaunchTests(unittest.TestCase):
         third = subprocess.Popen(self.command(), env=other_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
             for _ in range(100):
-                if len(list(self.work.iterdir())) == 2: break
+                if len(list(self.work.glob('s2arm-*'))) == 2: break
                 time.sleep(.02)
             else: self.fail('save lock was not released')
         finally:
             third.terminate(); third.communicate(timeout=3)
+
+    def test_cache_lock_survives_exec_even_with_different_save_writer(self):
+        first = subprocess.Popen(self.command(), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            for _ in range(100):
+                if list(self.work.glob('s2arm-*/cache.json')): break
+                if first.poll() is not None: self.fail(first.communicate()[1].decode())
+                time.sleep(.02)
+            else: self.fail('cache was not acquired')
+            other_save = self.root / 'second-save'; other_save.mkdir()
+            other = {**self.env, 'DM_SAVE': str(other_save), 'NXB_VIDEO_GENERATION': '2'}
+            second = subprocess.run(self.command(), env=other, capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(second.returncode, 0, 'another save must not bypass the cache writer lock')
+            self.assertFalse((other_save / 'ryu').exists())
+            self.assertFalse((self.work / ('s2arm-' + self.env['NXB_SESSION_ID'] + '-2') / 'cache.json').exists())
+        finally:
+            first.terminate(); first.communicate(timeout=3)
 
 
 if __name__ == '__main__':

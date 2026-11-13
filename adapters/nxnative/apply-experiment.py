@@ -4,13 +4,16 @@ from pathlib import Path
 import subprocess
 import sys
 
-PIN = "b8d16169c5fb7a3c6a936a950e294b1df4680551"
+PATCHES = {
+    "b8d16169c5fb7a3c6a936a950e294b1df4680551": ("pcm-probe.patch", "video-probe.patch", "input-integration.patch"),
+    "8d44aaf8f3a59eb0e0f63ced14b3f7f26e903484": ("integration-8d44aaf.patch",),
+}
 HERE = Path(__file__).resolve().parent
 if len(sys.argv) != 2:
     raise SystemExit("usage: apply-experiment.py PATH_TO_DISPOSABLE_NXNATIVE_CHECKOUT")
 root = Path(sys.argv[1]).resolve()
 head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-if head != PIN:
+if head not in PATCHES:
     raise SystemExit("Unexpected nxnative revision; refusing to modify checkout")
 files = {
     "pcm_queue.h": "dm/host/pcm_queue.h",
@@ -28,7 +31,7 @@ for target in ("dm/host/nxbridge_input.h", "dm/host/hle_nxbridge_input.c"):
         raise SystemExit(f"Refusing to overwrite existing {target}")
 if (root / "dm/host/mach_media.h").exists():
     raise SystemExit("Refusing to overwrite existing dm/host/mach_media.h")
-for patch in ("pcm-probe.patch", "video-probe.patch", "input-integration.patch"):
+for patch in PATCHES[head]:
     subprocess.run(["git", "-C", str(root), "apply", "--check", str(HERE / patch)], check=True)
 for source, target in files.items():
     text = (HERE / source).read_text()
@@ -38,6 +41,6 @@ for source, target in files.items():
 (root / "dm/host/nxbridge_input.h").write_bytes((HERE.parent / "input/nxbridge_input.h").read_bytes())
 (root / "dm/host/hle_nxbridge_input.c").write_bytes((HERE.parent / "input/nxbridge_input.c").read_bytes())
 (root / "dm/host/mach_media.h").write_bytes((HERE / "mach_media.h").read_bytes())
-for patch in ("pcm-probe.patch", "video-probe.patch", "input-integration.patch"):
+for patch in PATCHES[head]:
     subprocess.run(["git", "-C", str(root), "apply", str(HERE / patch)], check=True)
 print("Applied NXB-035 experiments to the disposable checkout")

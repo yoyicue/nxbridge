@@ -14,7 +14,7 @@ use std::{
 use tokio::{
     io::AsyncReadExt,
     net::{UnixDatagram, UnixStream},
-    sync::mpsc,
+    sync::{mpsc, watch},
 };
 
 // The group is created by this session and inherited by its worker and game.
@@ -37,6 +37,22 @@ fn child_fd(fd: i32) -> io::Result<OwnedFd> {
     } else {
         Ok(unsafe { OwnedFd::from_raw_fd(n) })
     }
+}
+
+fn input_startup_timeout(value: Option<&str>) -> io::Result<Duration> {
+    let Some(value) = value else {
+        return Ok(Duration::from_secs(20));
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(io::Error::other("invalid prewarm deadline"));
+    }
+    let ms = value
+        .parse::<u64>()
+        .map_err(|_| io::Error::other("invalid prewarm deadline"))?;
+    if !(15_000..=120_000).contains(&ms) {
+        return Err(io::Error::other("invalid prewarm deadline"));
+    }
+    Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(30)))
 }
 
 // A Darwin AF_UNIX datagram pair defaults to only about two audio packets.
@@ -120,6 +136,144 @@ fn enqueue_audio(
     }
 }
 
+async fn relay_video(
+    mut vr: UnixStream,
+    video: mpsc::Sender<EncodedFrame>,
+    shutdown: watch::Sender<bool>,
+) {
+    let mut stopping = shutdown.subscribe();
+    let mut number = 1u32;
+    let mut last = 0u64;
+    loop {
+        let mut h = [0u8; 12];
+        if vr.read_exact(&mut h).await.is_err() {
+            break;
+        }
+        let pts = u64::from_le_bytes(h[0..8].try_into().unwrap());
+        let len = u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize;
+        if pts <= last || len == 0 || len > 16 * 1024 * 1024 {
+            break;
+        }
+        let mut data = vec![0; len];
+        if vr.read_exact(&mut data).await.is_err() {
+            break;
+        }
+        let key = data
+            .windows(5)
+            .any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 31 == 5);
+        let timestamp = ((u128::from(pts) * 90_000 / 1_000_000_000) & 0xffff_ffff) as u32;
+        if !*stopping.borrow() {
+            let frame = EncodedFrame {
+                queued_at: std::time::Instant::now(),
+                data,
+                is_key_frame: key,
+                frame_number: number,
+                rtp_timestamp: timestamp,
+            };
+            tokio::select! {
+                biased;
+                _ = stopping.changed() => {},
+                result = video.send(frame) => {
+                    if result.is_err() { shutdown.send_replace(true); }
+                },
+            }
+        }
+        // Keep the worker socket open and drain its bounded tail after the
+        // client leaves. Closing it now turns normal shutdown into EPIPE.
+        last = pts;
+        number = number.wrapping_add(1);
+    }
+}
+
+async fn relay_audio(
+    ar: UnixDatagram,
+    audio: mpsc::Sender<HostAudioChunk>,
+    epoch: Epoch,
+    shutdown: watch::Sender<bool>,
+) {
+    let mut packet = [0u8; 16 + 480 * 8];
+    let mut last = 0u64;
+    let mut discontinuities = 0u64;
+    let mut dropped = 0u64;
+    let mut received = 0u64;
+    let mut accepted = 0u64;
+    let mut first_pts = None;
+    let started = tokio::time::Instant::now();
+    let mut last_report = started;
+    let mut pending_discontinuity = false;
+    let mut last_receive = None;
+    let mut receive_gap_max_us = 0u128;
+    let mut source_age_max_us = 0u64;
+    let mut source_late_blocks = 0u64;
+    loop {
+        let n = match ar.recv(&mut packet).await {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if *shutdown.borrow() {
+            continue;
+        }
+        let Some((pts, flags, pcm)) = decode_audio_packet(&packet[..n], last) else {
+            continue;
+        };
+        let received_at = tokio::time::Instant::now();
+        if let Some(previous) = last_receive.replace(received_at) {
+            receive_gap_max_us =
+                receive_gap_max_us.max(received_at.duration_since(previous).as_micros());
+        }
+        // Both the native source and this process use CLOCK_MONOTONIC.
+        // This measures source-to-Rust age, not a cross-device latency.
+        let source_age_us = crate::clock_ns().saturating_sub(pts) / 1_000;
+        source_age_max_us = source_age_max_us.max(source_age_us);
+        source_late_blocks += u64::from(source_age_us > 20_000);
+        if flags & nxbridge_media::AUDIO_DISCONTINUITY != 0 {
+            discontinuities += 1;
+            if discontinuities <= 3 || discontinuities.is_power_of_two() {
+                eprintln!("game audio source discontinuity #{discontinuities}");
+            }
+        }
+        received += 1;
+        let initial_pts = *first_pts.get_or_insert(pts);
+        let chunk = HostAudioChunk {
+            session_id: epoch.session_id,
+            generation: epoch.generation,
+            pts_ns: pts,
+            discontinuity: flags & nxbridge_media::AUDIO_DISCONTINUITY != 0,
+            pcm,
+        };
+        match enqueue_audio(&audio, chunk, &mut pending_discontinuity) {
+            Ok(true) => {
+                dropped += 1;
+                if dropped <= 3 || dropped.is_power_of_two() {
+                    eprintln!("game audio downstream queue full: {dropped} block(s) dropped");
+                }
+            }
+            Ok(false) => accepted += 1,
+            Err(()) => {
+                shutdown.send_replace(true);
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now.duration_since(last_report) >= Duration::from_secs(10) {
+            eprintln!(
+                "game audio stats wall_ms={} source_ms={} received={} accepted={} dropped={} receive_gap_max_us={} source_age_max_us={} source_late_blocks={}",
+                now.duration_since(started).as_millis(),
+                pts.saturating_sub(initial_pts) / 1_000_000,
+                received,
+                accepted,
+                dropped,
+                receive_gap_max_us,
+                source_age_max_us,
+                source_late_blocks
+            );
+            last_report = now;
+            receive_gap_max_us = 0;
+            source_age_max_us = 0;
+        }
+        last = pts;
+    }
+}
+
 pub async fn run(
     manager: SessionManager,
     epoch: Epoch,
@@ -158,6 +312,11 @@ pub async fn run(
     if port < 1024 {
         return Err(io::Error::other("invalid input port"));
     }
+    let startup_timeout = input_startup_timeout(
+        selected
+            .and_then(|game| game.environment.get("DM_NXB_PSO_PREPARE_MAX_MS"))
+            .map(String::as_str),
+    )?;
     let reservation = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
     let mut token = [0u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut token)?;
@@ -214,133 +373,24 @@ pub async fn run(
     drop(af);
     drop(video_child);
     drop(audio_child);
-    let mut vr = UnixStream::from_std(video_parent)?;
+    let vr = UnixStream::from_std(video_parent)?;
     let ar = UnixDatagram::from_std(audio_parent)?;
     let input_task = tokio::spawn(async move {
-        if let Err(e) = crate::game_input::forward(input, port, token).await {
+        if let Err(e) =
+            crate::game_input::forward_with_startup_timeout(input, port, token, startup_timeout)
+                .await
+        {
             eprintln!("game input bridge: {e}");
         }
     });
-    let v = tokio::spawn(async move {
-        let mut number = 1u32;
-        let mut last = 0u64;
-        loop {
-            let mut h = [0u8; 12];
-            if vr.read_exact(&mut h).await.is_err() {
-                break;
-            }
-            let pts = u64::from_le_bytes(h[0..8].try_into().unwrap());
-            let len = u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize;
-            if pts <= last || len == 0 || len > 16 * 1024 * 1024 {
-                break;
-            }
-            let mut data = vec![0; len];
-            if vr.read_exact(&mut data).await.is_err() {
-                break;
-            }
-            let key = data
-                .windows(5)
-                .any(|x| x[..4] == [0, 0, 0, 1] && x[4] & 31 == 5);
-            let timestamp = ((u128::from(pts) * 90_000 / 1_000_000_000) & 0xffff_ffff) as u32;
-            if video
-                .send(EncodedFrame {
-                    queued_at: std::time::Instant::now(),
-                    data,
-                    is_key_frame: key,
-                    frame_number: number,
-                    rtp_timestamp: timestamp,
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
-            last = pts;
-            number = number.wrapping_add(1);
-        }
-    });
-    let a = tokio::spawn(async move {
-        let mut packet = [0u8; 16 + 480 * 8];
-        let mut last = 0u64;
-        let mut discontinuities = 0u64;
-        let mut dropped = 0u64;
-        let mut received = 0u64;
-        let mut accepted = 0u64;
-        let mut first_pts = None;
-        let started = tokio::time::Instant::now();
-        let mut last_report = started;
-        let mut pending_discontinuity = false;
-        let mut last_receive = None;
-        let mut receive_gap_max_us = 0u128;
-        let mut source_age_max_us = 0u64;
-        let mut source_late_blocks = 0u64;
-        loop {
-            let n = match ar.recv(&mut packet).await {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            let Some((pts, flags, pcm)) = decode_audio_packet(&packet[..n], last) else {
-                continue;
-            };
-            let received_at = tokio::time::Instant::now();
-            if let Some(previous) = last_receive.replace(received_at) {
-                receive_gap_max_us =
-                    receive_gap_max_us.max(received_at.duration_since(previous).as_micros());
-            }
-            // Both the native source and this process use CLOCK_MONOTONIC.
-            // This measures source-to-Rust age, not a cross-device latency.
-            let source_age_us = crate::clock_ns().saturating_sub(pts) / 1_000;
-            source_age_max_us = source_age_max_us.max(source_age_us);
-            source_late_blocks += u64::from(source_age_us > 20_000);
-            if flags & nxbridge_media::AUDIO_DISCONTINUITY != 0 {
-                discontinuities += 1;
-                if discontinuities <= 3 || discontinuities.is_power_of_two() {
-                    eprintln!("game audio source discontinuity #{discontinuities}");
-                }
-            }
-            received += 1;
-            let initial_pts = *first_pts.get_or_insert(pts);
-            let chunk = HostAudioChunk {
-                session_id: epoch.session_id,
-                generation: epoch.generation,
-                pts_ns: pts,
-                discontinuity: flags & nxbridge_media::AUDIO_DISCONTINUITY != 0,
-                pcm,
-            };
-            match enqueue_audio(&audio, chunk, &mut pending_discontinuity) {
-                Ok(true) => {
-                    dropped += 1;
-                    if dropped <= 3 || dropped.is_power_of_two() {
-                        eprintln!("game audio downstream queue full: {dropped} block(s) dropped");
-                    }
-                }
-                Ok(false) => accepted += 1,
-                Err(()) => break,
-            }
-            let now = tokio::time::Instant::now();
-            if now.duration_since(last_report) >= Duration::from_secs(10) {
-                eprintln!(
-                    "game audio stats wall_ms={} source_ms={} received={} accepted={} dropped={} receive_gap_max_us={} source_age_max_us={} source_late_blocks={}",
-                    now.duration_since(started).as_millis(),
-                    pts.saturating_sub(initial_pts) / 1_000_000,
-                    received,
-                    accepted,
-                    dropped,
-                    receive_gap_max_us,
-                    source_age_max_us,
-                    source_late_blocks
-                );
-                last_report = now;
-                receive_gap_max_us = 0;
-                source_age_max_us = 0;
-            }
-            last = pts;
-        }
-    });
+    let (shutdown, _) = watch::channel(false);
+    let v = tokio::spawn(relay_video(vr, video, shutdown.clone()));
+    let a = tokio::spawn(relay_audio(ar, audio, epoch, shutdown.clone()));
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if v.is_finished()
             || a.is_finished()
+            || *shutdown.borrow()
             || input_task.is_finished()
             || manager.video_frame_sender().await.is_none()
             || child.try_wait()?.is_some()
@@ -348,8 +398,7 @@ pub async fn run(
             break;
         }
     }
-    v.abort();
-    a.abort();
+    shutdown.send_replace(true);
     input_task.abort();
     if let Some(pid) = child.id() {
         unsafe {
@@ -373,6 +422,13 @@ pub async fn run(
             libc::kill(-pid, libc::SIGTERM);
         }
     }
+    // The producer has exited (or was forcibly stopped by the existing
+    // deadline). Only now may its video and PCM receivers be dropped.
+    v.abort();
+    a.abort();
+    let _ = v.await;
+    let _ = a.await;
+    let _ = input_task.await;
     group.0 = None;
     Ok(())
 }
@@ -380,6 +436,160 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_startup_timeout_is_bounded_and_opt_in() {
+        assert_eq!(
+            input_startup_timeout(None).unwrap(),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            input_startup_timeout(Some("120000")).unwrap(),
+            Duration::from_secs(150)
+        );
+        for value in ["", "14999", "120001", "-1", "+15000", "abc"] {
+            assert!(
+                input_startup_timeout(Some(value)).is_err(),
+                "accepted {value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_video_consumer_keeps_draining_worker_until_exit() {
+        use tokio::io::AsyncWriteExt;
+        let (mut producer, reader) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let (stop, _) = watch::channel(false);
+        let mut relay = tokio::spawn(relay_video(reader, tx, stop.clone()));
+        let mut frame = vec![0; 17];
+        frame[8..12].copy_from_slice(&5u32.to_le_bytes());
+        frame[12..].copy_from_slice(&[0, 0, 0, 1, 0x65]);
+        frame[..8].copy_from_slice(&1u64.to_le_bytes());
+        producer.write_all(&frame).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut relay)
+                .await
+                .is_err(),
+            "closing GameStream must not close the worker's socket before its tail drains"
+        );
+        assert!(*stop.borrow());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for pts in 2..4096u64 {
+                frame[..8].copy_from_slice(&pts.to_le_bytes());
+                producer.write_all(&frame).await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        drop(producer);
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_audio_consumer_keeps_draining_worker_until_exit() {
+        let (producer, reader) = UnixDatagram::pair().unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let (stop, _) = watch::channel(false);
+        let mut relay = tokio::spawn(relay_audio(
+            reader,
+            tx,
+            Epoch {
+                session_id: [7; 16],
+                generation: 1,
+            },
+            stop.clone(),
+        ));
+        let mut packet = vec![0; 16 + 240 * 8];
+        packet[8..12].copy_from_slice(&240u32.to_le_bytes());
+        packet[..8].copy_from_slice(&1u64.to_le_bytes());
+        producer.send(&packet).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut relay)
+                .await
+                .is_err(),
+            "closing GameStream must retain the PCM receiver until worker exit"
+        );
+        assert!(*stop.borrow());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for pts in 2..512u64 {
+                packet[..8].copy_from_slice(&pts.to_le_bytes());
+                loop {
+                    match producer.send(&packet).await {
+                        Ok(n) => {
+                            assert_eq!(n, packet.len());
+                            break;
+                        }
+                        // This test bursts faster than the 5 ms source clock.
+                        // Darwin reports ENOBUFS even for an open peer; retry
+                        // capacity pressure, but never a closed-socket error.
+                        Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
+                            tokio::task::yield_now().await;
+                        }
+                        Err(e) => panic!("audio tail receiver closed: {e}"),
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        relay.abort();
+        assert!(relay.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_unblocks_full_video_queue_without_forwarding_tail() {
+        use tokio::io::AsyncWriteExt;
+        let (mut producer, reader) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        let (stop, _) = watch::channel(false);
+        let relay = tokio::spawn(relay_video(reader, tx, stop.clone()));
+        let mut packet = vec![0; 17];
+        packet[8..12].copy_from_slice(&5u32.to_le_bytes());
+        packet[12..].copy_from_slice(&[0, 0, 0, 1, 0x65]);
+        packet[..8].copy_from_slice(&1_000_000_000u64.to_le_bytes());
+        producer.write_all(&packet).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.frame_number, 1);
+        assert_eq!(first.rtp_timestamp, 90_000);
+        assert!(first.is_key_frame);
+        // Leave the channel full so the next send waits for a slow consumer.
+        for pts in 1_000_000_001..1_000_000_003u64 {
+            packet[..8].copy_from_slice(&pts.to_le_bytes());
+            producer.write_all(&packet).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while rx.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for pts in 1_000_000_003..1_000_004_096u64 {
+                packet[..8].copy_from_slice(&pts.to_le_bytes());
+                producer.write_all(&packet).await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        drop(producer);
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rx.recv().await.unwrap().frame_number, 2);
+        assert!(rx.recv().await.is_none());
+    }
 
     #[test]
     fn audio_bridge_checks_flags_length_and_preserves_discontinuity() {

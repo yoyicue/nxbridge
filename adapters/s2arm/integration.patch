@@ -25,7 +25,7 @@ index 933ff18..24965a9 100644
  	clang $(PFX) -std=gnu11 -O1 -g -fobjc-arc -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) -Wall $(INC) -I$(OUT)/tests -Itests -o $@ tests/t_nvn_m3.m $(OUT)/mac/libnvn.a \
  	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++ $(NVN_TEST_WEAK)
 diff --git a/graphics/nvn/gfx/nvn/nvn_mtl.m b/graphics/nvn/gfx/nvn/nvn_mtl.m
-index e4eac69..235e654 100644
+index e4eac69..efa65e2 100644
 --- a/graphics/nvn/gfx/nvn/nvn_mtl.m
 +++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
 @@ -1,6 +1,8 @@
@@ -112,7 +112,24 @@ index e4eac69..235e654 100644
          uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
          if (cb.error) { atomic_store(&g_last_commit_error, 1); atomic_fetch_add(&g_commit_error_n, 1); if (mtl_gpu_halted()) mtl_gpu_cb_error(cb.error, "main replay", fence); else { static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (!victim) quar_fault(qsus, cb.error); if (victim ? nv++ < 1 : n++ < 8) MLOG("【红】 command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("【红】 state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("【红】 command buffer execution error: %s", cb.error.localizedDescription.UTF8String); mtl_gpu_cb_error(cb.error, "main replay", fence); s2a_direct_gpu_error(cb.error.localizedDescription.UTF8String); } }
          for (int i = 0; i < n; i++) {
-@@ -13816,7 +13825,7 @@ static void sub_cut(void) {
+@@ -8313,12 +8322,13 @@ static NSArray<NSString *> *warm_paths(int say) {
+     if (e && !strcmp(e, "off")) return nil;
+     if (e && *e) return @[@(e)];
+     NSString *seed = [shmap_path().stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"];
+-    NSMutableArray<NSString *> *all = [NSMutableArray arrayWithObject:seed];
++    NSMutableArray<NSString *> *all = [NSMutableArray array];
++    if ([NSFileManager.defaultManager fileExistsAtPath:seed]) [all addObject:seed];
++    else if (say) MLOG("pipeline prewarm: no packaged seed list: %s; using validated device records when available", seed.UTF8String);
+     NSString *user = pso_user_path();
+     if (user && [NSFileManager.defaultManager fileExistsAtPath:user]) [all addObject:user];
+     else if (say) MLOG("pipeline prewarm: this device's user list %s%s", user ? "does not exist yet: " : "has no path (neither DM_PSO_USER nor DM_SAVE is set)", user ? user.UTF8String : "");
+-    if (![NSFileManager.defaultManager fileExistsAtPath:seed]) { if (say) MLOG("【红】 pipeline prewarm: seed list does not exist: %s", seed.UTF8String); return nil; }
+-    return all;
++    return all.count ? all : nil;
+ }
+ // Tell the front end at once that the first frame will wait for the prewarm (10-30 device line, Monster Hunter Rise cold start mhrise_1030172905_1: the game's first present, 0.96 s, came
+ //   before its first submission, where the shader map loads lazily and the prewarm runs, so the loading page was taken down at that present and the 15 s prewarm showed black).
+@@ -13816,7 +13826,7 @@ static void sub_cut(void) {
      g_cut_copy = 0;
      if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
      up_flush();
@@ -121,7 +138,7 @@ index e4eac69..235e654 100644
      uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
      NSArray<NSString *> *qsus = quar_take();
      uint64_t sf = arena_cut();
-@@ -13825,7 +13834,7 @@ static void sub_cut(void) {
+@@ -13825,7 +13835,7 @@ static void sub_cut(void) {
      atomic_fetch_add(&g_seg_inflight, 1);
      fb_add(o, ^(id<MTL4CommitFeedback> cb) {
          atomic_fetch_sub(&g_seg_inflight, 1);
@@ -130,7 +147,7 @@ index e4eac69..235e654 100644
          arena_seg_done(sf);
          if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
          if (cb.error) { atomic_store(&g_last_commit_error, 1); atomic_fetch_add(&g_commit_error_n, 1); if (mtl_gpu_halted()) mtl_gpu_cb_error(cb.error, "segment", f); else { static int k; if (![cb.error.description containsString:@"InnocentVictim"]) quar_fault(qsus, cb.error); if (k++ < 8) MLOG("【红】 segment command buffer execution error: %s", cb.error.description.UTF8String); mtl_gpu_cb_error(cb.error, "segment", f); s2a_direct_gpu_error(cb.error.localizedDescription.UTF8String); } }
-@@ -15027,6 +15036,8 @@ static void rl_row(const uint8_t *q, NSUInteger w, NSUInteger h, unsigned long l
+@@ -15027,6 +15037,8 @@ static void rl_row(const uint8_t *q, NSUInteger w, NSUInteger h, unsigned long l
      for (NSUInteger k = 0; k < ng; k++) fprintf(g_rlf, "%02x", g[k]);
      fputc('\n', g_rlf); fflush(g_rlf); pthread_mutex_unlock(&g_rlmu);
  }
@@ -139,7 +156,7 @@ index e4eac69..235e654 100644
  static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
      if (mtl_gpu_halted()) { atomic_fetch_add_explicit(&g_gpu_refused, 1, memory_order_relaxed); return 0; }   // GPU 安全停：不取画布、不交上屏（调用方按「没交」把票记完成）
      if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
-@@ -15114,7 +15125,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+@@ -15114,7 +15126,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
      //   11-02 饥荒：游戏往没放宽的 1920 目标上画，真机 2.17 屏左右留黑边，Mac 普查无窗口局从不判几何、截图又按画面自己的比例出，满屏判「过」（假绿）
      if (!layer) { NSUInteger icw = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[2] : src.width, ich = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[3] : src.height;
          float ky = s2a_widen_ky(); fit_geom(16.0 / 9.0 * s2a_widen_k() / (ky > 0 ? ky : 1) * ich, ich, icw, ich); }
@@ -148,6 +165,22 @@ index e4eac69..235e654 100644
      if (!g_m3 && g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }   // the layer's residency set is macOS / iOS 26 on; Metal 3 presents through the command buffer
  #if TARGET_OS_OSX
      if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
+diff --git a/graphics/nvn/gfx/nvn/pso_archive.h b/graphics/nvn/gfx/nvn/pso_archive.h
+index 4b478af..62471ec 100644
+--- a/graphics/nvn/gfx/nvn/pso_archive.h
++++ b/graphics/nvn/gfx/nvn/pso_archive.h
+@@ -94,7 +94,10 @@ static int par_ga_lock(void) {
+ }
+ static void par_ga_unlock(int fd) { if (fd >= 0) flock(fd, LOCK_UN); }
+ static void par_ga_remove_new(NSSet<NSString *> *before) {
+-    NSMutableSet<NSString *> *made = [par_ga_list(0) mutableCopy]; [made minusSet:before];
++    // NXBridge: another application need not use S2Arm's lock. A newly created
++    // shared-directory entry is not proof that this host owns it. Clean only
++    // the application's bundle namespace; bare hosts leave shared files alone.
++    NSMutableSet<NSString *> *made = [par_ga_list(1) mutableCopy]; [made minusSet:before];
+     for (NSString *path in made) {
+         NSError *e = nil;
+         if ([NSFileManager.defaultManager removeItemAtPath:path error:&e]) atomic_fetch_add(&g_par_ga_removed, 1);
 diff --git a/platform/apple/cs/audio/AppleAudio.cs b/platform/apple/cs/audio/AppleAudio.cs
 index c8562ad..a1b1b3d 100644
 --- a/platform/apple/cs/audio/AppleAudio.cs

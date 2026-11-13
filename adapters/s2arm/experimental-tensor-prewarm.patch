@@ -1,0 +1,60 @@
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -96,6 +96,7 @@
+ 
+ static void warm_start(void), warm_announce(void);
+ static void nxb_copy_prepare(void);
++static void nxb_tensor_prepare(void);
+ static void warm_claim(void);
+ static void warm_bump(const char *vk, const char *fk);   // 游戏登记着色器程序时把预热清单里这对着色器的管线提到队头（warm_pick）
+ 
+@@ -8348,6 +8349,8 @@
+     if (g_warm_started++) return;
+     const char *nxb_copy = getenv("DM_NXB_COPY_PREWARM");
+     if (nxb_copy && !strcmp(nxb_copy, "1") && prepare_on()) nxb_copy_prepare();
++    const char *nxb_tensor = getenv("DM_NXB_TENSOR_PREWARM");
++    if (nxb_tensor && !strcmp(nxb_tensor, "1") && prepare_on()) nxb_tensor_prepare();
+     NSArray<NSString *> *paths = warm_paths(1);
+     if (!paths) return;
+     if (!g_warm_items) g_warm_items = [NSMutableArray array];
+--- a/graphics/nvn/gfx/nvn/nvn_tensor.inc
++++ b/graphics/nvn/gfx/nvn/nvn_tensor.inc
+@@ -75,13 +75,15 @@
+ "kernel void tensor_sq(texture2d<float, access::read> s [[texture(0)]], texture2d<float, access::write> d [[texture(1)]], uint2 p [[thread_position_in_grid]]) {\n"
+ "  if (p.x >= d.get_width() || p.y >= d.get_height()) return;\n"
+ "  float4 v = s.read(p); d.write(float4(v.rgb * abs(v.rgb), v.a), p); }\n";
++static _Thread_local int nxb_tensor_prepare_only;
+ static int tensor_sq_pass(id<MTLTexture> s, id<MTLTexture> d) {
+     static id<MTLComputePipelineState> ps; static id at; static int failed;
+     if (failed) return 0;
+     if (!at) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_tensor_sq_msl) options:nil error:&e]; id<MTLFunction> f = lib ? [lib newFunctionWithName:@"tensor_sq"] : nil;
+         ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+         at = ps ? rec_table(tab_new(1, 2, 0, &e)) : nil;
+-        if (!at) { failed = 1; MLOG("【红】 张量核网络顶替：平方计算核建不出（%s），要平方的出口层输出图不写", e.localizedDescription.UTF8String); return 0; } }
++        if (!at) { if (!nxb_tensor_prepare_only) failed = 1; MLOG("【红】 张量核网络顶替：平方计算核建不出（%s），要平方的出口层输出图不写", e.localizedDescription.UTF8String); return 0; } }
++    if (nxb_tensor_prepare_only) return 1;
+     id ce = enc_c_begin(NULL); enc_c_table(ce, at); tab_tex(at, s, 0); tab_tex(at, d, 1); [ce setComputePipelineState:ps];
+     enc_c_dispatch(ce, MTLSizeMake((d.width + 15) / 16, (d.height + 15) / 16, 1), MTLSizeMake(16, 16, 1));
+     enc_c_end(ce);
+@@ -90,6 +92,11 @@
+     return 1;
+ }
+ 
++static void nxb_tensor_prepare(void) {
++    uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++    nxb_tensor_prepare_only = 1; int ok = tensor_sq_pass(nil, nil); nxb_tensor_prepare_only = 0;
++    MLOG("[nxb-tensor-prepare] ready=%d elapsed_ms=%.3f (pipeline only; no GPU work)", ok, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6);
++}
+ static NvDlss *tensor_scaler(id<MTLTexture> c, id<MTLTexture> o) {
+     for (int i = 0; i < 4; i++) { NvDlss *f = g_tensor_fx[i]; if (f && f->cf == c.pixelFormat && f->of == o.pixelFormat && f->iw == c.width && f->ih == c.height && f->ow == o.width && f->oh == o.height) return f; }
+     Class scl = dlss_class("MTLFXSpatialScalerDescriptor");
+--- a/nxbridge/launch.py
++++ b/nxbridge/launch.py
+@@ -100,6 +100,7 @@
+     })
+     # Experimental per-game option; not inherited unless explicitly selected.
+     env['DM_NXB_COPY_PREWARM'] = inherited.get('DM_NXB_COPY_PREWARM', '0')
++    env['DM_NXB_TENSOR_PREWARM'] = inherited.get('DM_NXB_TENSOR_PREWARM', '0')
+     return host, game, save, run, cache_identity, env
+ 
+ 

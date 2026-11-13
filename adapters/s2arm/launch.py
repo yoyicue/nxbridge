@@ -2,7 +2,7 @@
 """Launch a prepared S2Arm game with NXBridge's per-player save/work directories.
 
 GameStream can use ENGINE/nxbridge/launch.py as its host and a prepared Mac game
-root as its game_dir. DM_SAVE and DM_TEMP keep the existing catalog contract.
+root as its game_dir. DM_CACHE optionally separates reusable caches from DM_TEMP.
 """
 import argparse
 import fcntl
@@ -13,6 +13,9 @@ from pathlib import Path
 import re
 import runpy
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import s2arm_cache
 
 
 def directory(value, label):
@@ -33,8 +36,11 @@ def plan(engine, game, save, work, inherited):
     game = directory(game, 'game root')
     save = directory(save, 'DM_SAVE')
     work = directory(work, 'DM_TEMP')
+    cache_root = directory(inherited['DM_CACHE'], 'DM_CACHE') if 'DM_CACHE' in inherited else work
     if any(overlaps(a, b) for a, b in ((save, work), (save, game), (work, game), (save, engine), (work, engine))):
         raise ValueError('save, work, game and engine paths must not overlap writable storage')
+    if 'DM_CACHE' in inherited and any(overlaps(cache_root, p) for p in (save, work, game, engine)):
+        raise ValueError('DM_CACHE must not overlap save, work, game or engine paths')
     state = save / 'ryu'
     if state.is_symlink() or (state.exists() and not state.is_dir()):
         raise ValueError('persistent state must be a directory inside DM_SAVE')
@@ -64,6 +70,11 @@ def plan(engine, game, save, work, inherited):
     if not re.fullmatch(r'[0-9]+', generation) or not 0 < int(generation) < 2**64:
         raise ValueError('NXB_VIDEO_GENERATION must be a positive u64')
     run = work / f's2arm-{session.lower()}-{int(generation)}'
+    cache_identity = s2arm_cache.identity(engine, game, manifest)
+    cache = s2arm_cache.location(cache_root, cache_identity)
+    prepare_ms = inherited.get('DM_NXB_PSO_PREPARE_MAX_MS', '15000')
+    if not re.fullmatch(r'[0-9]+', prepare_ms) or not 15000 <= int(prepare_ms) <= 120000:
+        raise ValueError('DM_NXB_PSO_PREPARE_MAX_MS must be 15000 to 120000')
     # A build/profile never inherits another game's data, diagnostics, autoplay,
     # cheats, renderer cache or platform settings from the service process.
     env = {key: value for key, value in inherited.items()
@@ -74,13 +85,31 @@ def plan(engine, game, save, work, inherited):
         # (an empty value also prevents the upstream .env from enabling it).
         'S2A_SAVE_DIR': '', 'S2A_GAME_DATA': str(game),
         'S2A_DOCS': str(run), 'S2A_RYU_DATA': str(state),
-        'NXGAL_SHADER_CACHE_DIR': str(run / 'gal'),
+        'NXGAL_SHADER_CACHE_DIR': str(cache / 'gal'),
+        'DM_MSL_FALLBACK': str(cache / 'shaders'),
+        'DM_PSO_USER': str(cache / 'pso_user.tsv'),
+        # Loading work has a deadline; background work uses the upstream
+        # in-flight deduplication and yields to actual first-use compilation.
+        'DM_PSO_PREPARE': '1', 'DM_PSO_PREPARE_THREADS': str(min(4, max(1, (os.cpu_count() or 2) // 2))),
+        'DM_PSO_PREPARE_MAX_MS': str(int(prepare_ms)), 'DM_PSO_BG_THREADS': '2', 'DM_PSO_FU_YIELD': '1',
         'S2A_AUTOPLAY': '0', 'S2A_AUDIO_OFF': '0',
+        'NXBRIDGE_AUDIO_STATS': '1',
         'S2A_FRAMES_TSV': str(run / 'frames.tsv'),
         'S2A_AUTOPLAY_OUT': str(run), 'S2A_RUN_ROOT': str(run / 'runtime'),
         'S2A_MACRO_DUMP': str(run / 'macro'),
     })
-    return host, game, save, run, env
+    # These measured, game-specific warmups are opt-in and must match the
+    # tracked game identity. A game update automatically falls back to the
+    # upstream first-use path instead of inheriting another build's settings.
+    options = ('DM_NXB_COPY_PREWARM', 'DM_NXB_TENSOR_PREWARM')
+    requested = any(inherited.get(name) == '1' for name in options)
+    expected = inherited.get('DM_NXB_PREWARM_GAME_SHA256', '')
+    matches = bool(re.fullmatch(r'[0-9a-f]{64}', expected)) and expected == s2arm_cache.game_key(cache_identity)
+    if requested and not matches:
+        print('S2Arm: internal-pipeline prewarm disabled: game build identity does not match', file=sys.stderr)
+    for name in options:
+        env[name] = '1' if matches and inherited.get(name) == '1' else '0'
+    return host, game, save, run, cache_identity, env
 
 
 def check_chain(script, game, env):
@@ -110,7 +139,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     try:
-        host, game, save, run, env = plan(args.engine, args.game_root,
+        host, game, save, run, cache_identity, env = plan(args.engine, args.game_root,
                                         os.environ.get('DM_SAVE'), os.environ.get('DM_TEMP'), os.environ)
         # Use the upstream read-only compatibility check before acquiring a
         # save lock or creating a session. The mismatch override was filtered.
@@ -125,8 +154,11 @@ def main():
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.set_inheritable(lock_fd, True)
         run.mkdir(mode=0o700, exist_ok=False)
+        cache_root = directory(os.environ['DM_CACHE'], 'DM_CACHE') if 'DM_CACHE' in os.environ else run.parent
+        cache, cache_fd = s2arm_cache.acquire(cache_root, cache_identity)
+        (run / 'cache.json').write_text(json.dumps({'key': cache.name, 'identity': cache_identity}, indent=2) + '\n')
         (save / 'ryu').mkdir(mode=0o700, exist_ok=True)
-        for child in ('gal', 'macro', 'runtime'):
+        for child in ('macro', 'runtime'):
             (run / child).mkdir(mode=0o700)
         os.chdir(run)
         os.execve(host, [str(host), str(game)], env)

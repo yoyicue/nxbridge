@@ -1,0 +1,11 @@
+--- a/src/VideoStream.c
++++ b/src/VideoStream.c
+@@ -4,7 +4,7 @@
+ #define FIRST_FRAME_TIMEOUT_SEC 10
+ // Allow a slow host to initialize before the first packet; retain the
+ // existing deadline for completing a frame after packets begin.
+-#define FIRST_VIDEO_TRAFFIC_TIMEOUT_SEC 45
++#define FIRST_VIDEO_TRAFFIC_TIMEOUT_SEC 180
+ 
+ #define FIRST_FRAME_PORT 47996
+ 

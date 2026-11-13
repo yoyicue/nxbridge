@@ -60,14 +60,26 @@ fn reset_packet(seq: u64) -> [u8; 22] {
 /// Forward one session's input to its local receiver. A broken local socket is
 /// retried for a bounded time; queued states are discarded and a fresh neutral
 /// is required before any new held input can reach the game.
+#[cfg(test)]
 pub async fn forward(input: InputReceiver, port: u16, token: [u8; 32]) -> io::Result<()> {
-    forward_inner(input, port, token, true).await
+    forward_inner(input, port, token, true, Duration::from_secs(20)).await
+}
+
+/// Longer startup preparation is opt-in and affects only the first connection;
+/// recovery after a live receiver fails remains bounded to five seconds.
+pub async fn forward_with_startup_timeout(
+    input: InputReceiver,
+    port: u16,
+    token: [u8; 32],
+    startup_timeout: Duration,
+) -> io::Result<()> {
+    forward_inner(input, port, token, true, startup_timeout).await
 }
 
 // The synthetic observer currently consumes a single connection. It retains the
 // same packet / overflow handling but does not opt into game-side reconnection.
 pub async fn forward_single(input: InputReceiver, port: u16, token: [u8; 32]) -> io::Result<()> {
-    forward_inner(input, port, token, false).await
+    forward_inner(input, port, token, false, Duration::from_secs(20)).await
 }
 
 async fn forward_inner(
@@ -75,6 +87,7 @@ async fn forward_inner(
     port: u16,
     token: [u8; 32],
     reconnect: bool,
+    startup_timeout: Duration,
 ) -> io::Result<()> {
     let mut rx = input.events;
     let mut overflow = input.overflow;
@@ -82,8 +95,8 @@ async fn forward_inner(
     let mut ever_connected = false;
     let mut recovery_deadline = None;
     loop {
-        let deadline = recovery_deadline
-            .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(20));
+        let deadline =
+            recovery_deadline.unwrap_or_else(|| tokio::time::Instant::now() + startup_timeout);
         let mut stream = loop {
             if rx.is_closed() {
                 return Ok(());
@@ -192,6 +205,65 @@ async fn forward_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn delayed_start_drops_stale_inputs_before_connecting() {
+        use moonshine_core::session::stream::control::host_input::{InputPacket, InputReceiver};
+        use tokio::{
+            io::AsyncReadExt,
+            net::TcpListener,
+            sync::{mpsc, watch},
+        };
+
+        let reserved = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let (tx, events) = mpsc::channel(8);
+        let (_reset, overflow) = watch::channel(0u64);
+        let task = tokio::spawn(forward_with_startup_timeout(
+            InputReceiver { events, overflow },
+            address.port(),
+            [7u8; 32],
+            Duration::from_secs(3),
+        ));
+        let mut press = vec![0; 24];
+        press[..4].copy_from_slice(&13u32.to_le_bytes());
+        press[8] = 1;
+        press[12..14].copy_from_slice(&0x1000u16.to_le_bytes());
+        tx.send(InputPacket {
+            epoch: 0,
+            payload: press.clone(),
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let listener = TcpListener::bind(address).await.unwrap();
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut token = [0; 32];
+        socket.read_exact(&mut token).await.unwrap();
+        assert_eq!(token, [7u8; 32]);
+        let mut frame = [0; 22];
+        socket.read_exact(&mut frame).await.unwrap();
+        assert_eq!(u16::from_be_bytes([frame[12], frame[13]]), 0);
+        tx.send(InputPacket {
+            epoch: 0,
+            payload: press,
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut frame))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(u16::from_be_bytes([frame[12], frame[13]]), 1);
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn overflow_neutralizes_and_requires_a_new_neutral_before_input() {
         use moonshine_core::session::stream::control::host_input::{InputPacket, InputReceiver};

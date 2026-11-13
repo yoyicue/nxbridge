@@ -115,7 +115,10 @@ fn validate(games: &[Game]) -> io::Result<()> {
                 return Err(invalid("game environment only accepts DM_ variables"));
             }
         }
-        for key in ["DM_SAVE", "DM_TEMP"] {
+        for key in ["DM_SAVE", "DM_TEMP", "DM_CACHE"] {
+            if key == "DM_CACHE" && !g.environment.contains_key(key) {
+                continue;
+            }
             let p = Path::new(
                 g.environment
                     .get(key)
@@ -123,7 +126,7 @@ fn validate(games: &[Game]) -> io::Result<()> {
             );
             if !p.is_absolute() || !p.is_dir() {
                 return Err(invalid(
-                    "save and temp must be existing absolute directories",
+                    "save, temp and configured cache must be existing absolute directories",
                 ));
             }
             let p = p.canonicalize()?;
@@ -131,7 +134,9 @@ fn validate(games: &[Game]) -> io::Result<()> {
                 .iter()
                 .any(|other: &PathBuf| p.starts_with(other) || other.starts_with(&p))
             {
-                return Err(invalid("game save and temp directories must not overlap"));
+                return Err(invalid(
+                    "game save, temp and cache directories must not overlap",
+                ));
             }
             writable.push(p);
         }
@@ -236,7 +241,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        for n in ["save1", "temp1", "save2", "temp2"] {
+        for n in ["save1", "temp1", "save2", "temp2", "cache1", "cache2"] {
             std::fs::create_dir(root.join(n)).unwrap();
         }
         let file = std::env::current_exe().unwrap();
@@ -271,6 +276,23 @@ mod tests {
         assert!(select(&[a.clone(), b.clone()], 0).is_none());
         assert!(validate(&[a.clone(), game("other", "save1", "temp2")]).is_err());
         assert!(validate(&[a.clone(), game("BOTW", "save2", "temp2")]).is_err());
+        let mut with_cache = a.clone();
+        with_cache.environment.insert(
+            "DM_CACHE".into(),
+            root.join("cache1").to_string_lossy().into_owned(),
+        );
+        validate(&[with_cache.clone(), b.clone()]).unwrap();
+        let mut conflict = b.clone();
+        conflict.environment.insert(
+            "DM_CACHE".into(),
+            root.join("cache1").to_string_lossy().into_owned(),
+        );
+        assert!(validate(&[with_cache.clone(), conflict]).is_err());
+        with_cache.environment.insert(
+            "DM_CACHE".into(),
+            root.join("temp1").to_string_lossy().into_owned(),
+        );
+        assert!(validate(&[with_cache]).is_err());
         let mut cmd = tokio::process::Command::new(&b.worker);
         apply_environment(
             &mut cmd,

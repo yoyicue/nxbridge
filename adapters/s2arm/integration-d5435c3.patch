@@ -1,0 +1,216 @@
+diff --git a/graphics/build.mk b/graphics/build.mk
+index 6868b698..24a19622 100644
+--- a/graphics/build.mk
++++ b/graphics/build.mk
+@@ -16,7 +16,7 @@ $(DSX_A): FORCE
+ # 直连图形层（graphics/nvn：NVN→Metal，双轨直连模式用；docs/设计_直连架构.md）同样静态链进宿主，只在图形模式 = 直连时被调到
+ NVN_A := build/nvn/mac/libnvn.a
+ # VideoToolbox / CoreMedia / CoreVideo：Switch 2 视频解码接管的 AV1 硬件解码（graphics/nvn/gfx/nvn/nvn2_codec.c）
+-HOST_LIBS += $(NVN_A) -framework ImageIO -framework UniformTypeIdentifiers -framework VideoToolbox -framework CoreMedia -framework CoreVideo
++HOST_LIBS += $(NVN_A) -framework IOSurface -framework ImageIO -framework UniformTypeIdentifiers -framework VideoToolbox -framework CoreMedia -framework CoreVideo
+ $(BUILD)/s2arm-host: $(NVN_A)
+ $(NVN_A): FORCE
+ 	$(MAKE) -C graphics/nvn mac
+diff --git a/graphics/nvn/Makefile b/graphics/nvn/Makefile
+index 10eb9c0a..87221500 100644
+--- a/graphics/nvn/Makefile
++++ b/graphics/nvn/Makefile
+@@ -98,7 +98,7 @@ widen-stubs: $(OUT)/tests/widen_stubs.inc
+ # 直连层单测链 libnvn.a 不链原生层：libnvn 引用的宿主符号放行参数只从源码「// 弱链接[nvntest]：<符号>」登记生成（同 runtime/build.mk NVN_TEST_WEAK，
+ #   tools/weak_link_decl.py 一处口径；11-01 合入线：这里原先手抄 -U，帧录放加 3 个符号漏了一处，graphics/gate 直连两路冒烟链接红）。不要在链接行手写放行参数
+ # nvn2_codec.c（Switch 2 视频解码接管）用 VideoToolbox / CoreMedia / CoreVideo 系统框架，同 runtime/build.mk NVN_TEST_WEAK 一起带上
+-NVN_TEST_WEAK := $(shell python3 $(ROOT)/tools/weak_link_decl.py flags nvntest) -framework VideoToolbox -framework CoreMedia -framework CoreVideo
++NVN_TEST_WEAK := $(shell python3 $(ROOT)/tools/weak_link_decl.py flags nvntest) -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface
+ $(OUT)/tests/t_nvn_m3: $(OUT)/mac/libnvn.a tests/t_nvn_m3.m tests/host_stubs.h $(OUT)/tests/widen_stubs.inc $(ROOT)/tools/weak_link_decl.py
+ 	clang $(PFX) -std=gnu11 -O1 -g -fobjc-arc -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) -Wall $(INC) -I$(OUT)/tests -Itests -o $@ tests/t_nvn_m3.m $(OUT)/mac/libnvn.a \
+ 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++ $(NVN_TEST_WEAK)
+diff --git a/graphics/nvn/gfx/nvn/nvn_mtl.m b/graphics/nvn/gfx/nvn/nvn_mtl.m
+index 6e1c778f..daccefd2 100644
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -2,6 +2,8 @@
+ // S2Arm 2026-11-09: feedback checks include distinct NVN objects sharing host texture storage.
+ // 弱链接[host,ios]：mtl_tab_selftest（本文件定义；宿主与 iOS 链接行沿用原清单放行，runtime/build.mk 自动收）
+ #import <Metal/Metal.h>
++#import "nxbridge_video_probe.h"
++#include "nxbridge_gpu_timing.h"
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <QuartzCore/CAMetalDisplayLink.h>
+ #import <ImageIO/ImageIO.h>
+@@ -2121,7 +2123,7 @@ static fe_stat g_fe; static pthread_mutex_t g_fe_mu = PTHREAD_MUTEX_INITIALIZER;
+ static void fe_sync_note(uint64_t ns) { int m = s2a_ap_marked(); pthread_mutex_lock(&g_fe_mu); fe_note(&g_fe, ns, m); pthread_mutex_unlock(&g_fe_mu); }
+ // ---------- Per-frame GPU time aggregation ----------
+ #define GRING 1024
+-static struct { _Atomic uint64_t frame, ns, t0, t1; _Atomic int pending; } g_gpu[GRING];   // t0 / t1: the frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns)
++static struct { _Atomic uint64_t frame, ns, t0, t1; _Atomic int pending, invalid; } g_gpu[GRING];   // t0 / t1: the frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns)
+ static _Atomic uint64_t g_cur_frame;
+ // ---------- Same-process alternating measurement (DM_NVN_UB, off by default: without the environment variable the code below only adds one 'is it enabled' check) ----------
+ // On a hot real device the system keeps adjusting power / frequency, and segment comparison (segments A and B each run for a minute) cannot resolve differences of <10%; within the same run, toggle by phase in turn and take differences of adjacent phase pairs, so the drift cancels.
+@@ -2178,7 +2180,7 @@ void nvn_be_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) u
+ // Old-queue command buffers go through gpu_tag_f; the Metal 4 main submission backfills in the feedback of nvn_be_sub_commit (when switching to Metal 4 all the call sites were lost and the GPU column of the timing line became empty)
+ static double gpu_tag_begin(uint64_t f) {   // 返回提交时刻（CACurrentMediaTime）：调用方原样交给 gpu_tag_done，GPU 不可能早于它开始
+     unsigned k = f % GRING;
+-    if (atomic_load(&g_gpu[k].frame) != f) { atomic_store(&g_gpu[k].frame, f); atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].t0, UINT64_MAX); atomic_store(&g_gpu[k].t1, 0); }
++    if (atomic_load(&g_gpu[k].frame) != f) { atomic_store(&g_gpu[k].frame, f); atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].invalid, 0); atomic_store(&g_gpu[k].t0, UINT64_MAX); atomic_store(&g_gpu[k].t1, 0); }
+     atomic_fetch_add(&g_gpu[k].pending, 1);
+     return CACurrentMediaTime();
+ }
+@@ -2188,6 +2190,7 @@ static double gpu_tag_begin(uint64_t f) {   // 返回提交时刻（CACurrentMed
+ //      是一帧接一帧 1.5–3.3 秒；3 帧各 3 秒要求 GPU 被持续压满约 10 秒，单帧慢、偶发慢够不着。宿主侧（s2a_gpu_stuck）冻游戏线程（不再往 GPU 送新活，
+ //      已交的跑完），iOS 盖「继续玩 / 退出」页、Mac 弹同样两个按钮；选继续 → mtl_gpu_stuck_resume 清计数、解冻。不置 g_gpu_halt：已交、在交的照常跑完，
+ //      恢复后游戏等的栅栏都还在（拒交会让恢复后的局等一个永远不来的栅栏）。驱动报 Hang / PageFault 不经这里，仍是 mtl_gpu_halt 终局
++#define S2A_GPU_FRAME_MAX_MS 1000 /* NXBridge headless safety policy */
+ #define S2A_GPU_FRAME_SLOW_MS 1000
+ #define S2A_GPU_STUCK_MS 3000
+ #define S2A_GPU_STUCK_N 3
+@@ -2226,21 +2229,19 @@ uint64_t mtl_gpu_start_early(void) { return atomic_load(&g_gpu_start_early); }
+ static void gpu_tag_done(uint64_t f, int qi, double sub, double g0, double g1) {
+     unsigned k = f % GRING;
+     if (atomic_load(&g_gpu[k].frame) != f) return;
+-    if (g0 > 0 && sub > 0 && g0 < sub - 0.001) {
+-        uint64_t n = atomic_fetch_add(&g_gpu_start_early, 1);
+-        if (n < 4 || !(n & (n - 1))) MLOG("【黄】 GPU 开始时间早于提交 %.1f ms：帧 %llu 提交 %.3f，GPU %.3f→%.3f；按提交时刻算（第 %llu 次）",
+-            (sub - g0) * 1e3, (unsigned long long)f, sub, g0, g1, (unsigned long long)n + 1);
+-        g0 = sub;
++    double completed = CACurrentMediaTime();
++    nxb_gpu_timing timing = nxb_gpu_timing_measure(sub, completed, g0, g1, S2A_GPU_FRAME_MAX_MS * 1000000ull);
++    if (!timing.gpu_valid) {
++        atomic_store(&g_gpu[k].invalid, 1);
++        uint64_t busy = atomic_fetch_add(&g_gpu[k].ns, timing.safety_ns) + timing.safety_ns;
++        if (isfinite(g0) && isfinite(sub) && g0 > 0 && sub > 0 && g0 < sub - 0.001) atomic_fetch_add(&g_gpu_start_early, 1);
++        static _Atomic uint64_t invalid_n; uint64_t n = atomic_fetch_add(&invalid_n, 1);
++        if (n < 4 || !(n & (n - 1))) MLOG("NXBridge invalid GPU feedback: frame=%llu start=%.9f end=%.9f submitted=%.9f callback=%.9f; safety uses host upper bound", (unsigned long long)f, g0, g1, sub, completed);
++        if (busy > S2A_GPU_FRAME_MAX_MS * 1000000ull) { char w[160]; snprintf(w, sizeof w, "frame %llu GPU safety budget %.0f ms (includes host upper bounds; limit %d ms)", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS); mtl_gpu_halt(w); }
++        atomic_fetch_sub(&g_gpu[k].pending, 1);
++        return;
+     }
+     double d = g1 - g0;
+-    // 结束时间不可能晚于现在（GPUStart / GPUEnd 与 CACurrentMediaTime 同一时基）。11-09 M1 Pro 时之笛 S2：切出窗口再切回后，一个命令缓冲回报的跨度算出 6147890790964 ms（约 195 年），
+-    //   这道 1 秒门把它当成 GPU 挂死、安全停收局。这样的时间戳只打红行、不计进本帧 GPU 时间；真挂死的跨度结束在过去，照判
+-    if (d > 0 && g0 > 0 && g1 > CACurrentMediaTime() + 1.0) {
+-        static _Atomic int n; int k = atomic_fetch_add(&n, 1);
+-        if (k < 4 || !(k & (k - 1))) MLOG("【红】 GPU 时间戳不可能（结束在现在之后）：帧 %llu GPU %.3f→%.3f，现在 %.3f；不计进本帧 GPU 时间、不判挂死（第 %d 次）",
+-            (unsigned long long)f, g0, g1, CACurrentMediaTime(), k + 1);
+-        d = 0;
+-    }
+     if (d > 0 && g0 > 0) {   // a command buffer can complete with no start time (0, while a movie's frames upload each frame in Big Brain Academy: Brain vs. Brain), and its span would be the whole clock
+         uint64_t s0 = (uint64_t)(g0 * 1e9), s1 = (uint64_t)(g1 * 1e9), v;
+         _Atomic uint64_t *qe = &g_gpu_qend[qi & 1]; uint64_t prev = atomic_load(qe);
+@@ -2249,9 +2250,9 @@ static void gpu_tag_done(uint64_t f, int qi, double sub, double g0, double g1) {
+         uint64_t busy = atomic_fetch_add(&g_gpu[k].ns, excl) + excl;
+         for (v = atomic_load(&g_gpu[k].t0); s0 < v && !atomic_compare_exchange_weak(&g_gpu[k].t0, &v, s0);) {}
+         for (v = atomic_load(&g_gpu[k].t1); s1 > v && !atomic_compare_exchange_weak(&g_gpu[k].t1, &v, s1);) {}
+-        // 每道门只在让本帧跨过去的那一份算一次
+-        if (busy > S2A_GPU_FRAME_SLOW_MS * 1000000ull && busy - excl <= S2A_GPU_FRAME_SLOW_MS * 1000000ull) gpu_frame_slow(f, busy);
+-        if (busy > S2A_GPU_STUCK_MS * 1000000ull && busy - excl <= S2A_GPU_STUCK_MS * 1000000ull) gpu_frame_stuck(f, busy);
++        // Headless sessions have no interactive resume UI. Keep the previously
++        // validated one-second safety stop instead of the upstream player prompt.
++        if (busy > S2A_GPU_FRAME_MAX_MS * 1000000ull) { char w[120]; snprintf(w, sizeof w, "frame %llu kept the GPU busy %.0f ms (limit %d ms)", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS); mtl_gpu_halt(w); }
+     }
+     atomic_fetch_sub(&g_gpu[k].pending, 1);
+ }
+@@ -2259,12 +2260,12 @@ static void gpu_tag_f(id<MTLCommandBuffer> cb, uint64_t f) { double sub = gpu_ta
+ void gpu_tag(id<MTLCommandBuffer> cb) { gpu_tag_f(cb, atomic_load(&g_cur_frame)); }
+ double nvn_be_gpu_ms(uint64_t f) {
+     unsigned k = f % GRING;
+-    if (atomic_load(&g_gpu[k].frame) != f || atomic_load(&g_gpu[k].pending)) return -1;
++    if (atomic_load(&g_gpu[k].frame) != f || atomic_load(&g_gpu[k].pending) || atomic_load(&g_gpu[k].invalid)) return -1;
+     return atomic_load(&g_gpu[k].ns) / 1e6;
+ }
+ int nvn_be_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
+     unsigned k = f % GRING;
+-    if (atomic_load(&g_gpu[k].frame) != f || atomic_load(&g_gpu[k].pending)) return 0;
++    if (atomic_load(&g_gpu[k].frame) != f || atomic_load(&g_gpu[k].pending) || atomic_load(&g_gpu[k].invalid)) return 0;
+     *t0 = atomic_load(&g_gpu[k].t0); *t1 = atomic_load(&g_gpu[k].t1);
+     return *t1 >= *t0 && *t1;
+ }
+@@ -8766,12 +8767,13 @@ static NSArray<NSString *> *warm_paths(int say) {
+     if (e && !strcmp(e, "off")) return nil;
+     if (e && *e) return @[@(e)];
+     NSString *seed = [shmap_path().stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"];
+-    NSMutableArray<NSString *> *all = [NSMutableArray arrayWithObject:seed];
++    NSMutableArray<NSString *> *all = [NSMutableArray array];
++    if ([NSFileManager.defaultManager fileExistsAtPath:seed]) [all addObject:seed];
++    else if (say) MLOG("pipeline prewarm: no packaged seed list: %s; using validated device records when available", seed.UTF8String);
+     NSString *user = pso_user_path();
+     if (user && [NSFileManager.defaultManager fileExistsAtPath:user]) [all addObject:user];
+     else if (say) MLOG("pipeline prewarm: this device's user list %s%s", user ? "does not exist yet: " : "has no path (neither DM_PSO_USER nor DM_SAVE is set)", user ? user.UTF8String : "");
+-    if (![NSFileManager.defaultManager fileExistsAtPath:seed]) { if (say) MLOG("【红】 pipeline prewarm: seed list does not exist: %s", seed.UTF8String); return nil; }
+-    return all;
++    return all.count ? all : nil;
+ }
+ // Tell the front end at once that the first frame will wait for the prewarm (10-30 device line, Monster Hunter Rise cold start mhrise_1030172905_1: the game's first present, 0.96 s, came
+ //   before its first submission, where the shader map loads lazily and the prewarm runs, so the loading page was taken down at that present and the 15 s prewarm showed black).
+@@ -15658,6 +15660,8 @@ static void rl_row(const uint8_t *q, NSUInteger w, NSUInteger h, unsigned long l
+     for (NSUInteger k = 0; k < ng; k++) fprintf(g_rlf, "%02x", g[k]);
+     fputc('\n', g_rlf); fflush(g_rlf); pthread_mutex_unlock(&g_rlmu);
+ }
++#include "nxbridge_present.inc"
++
+ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
+     if (mtl_gpu_halted()) { atomic_fetch_add_explicit(&g_gpu_refused, 1, memory_order_relaxed); return 0; }   // GPU 安全停：不取画布、不交上屏（调用方按「没交」把票记完成）
+     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
+@@ -15745,7 +15749,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     //   11-02 饥荒：游戏往没放宽的 1920 目标上画，真机 2.17 屏左右留黑边，Mac 普查无窗口局从不判几何、截图又按画面自己的比例出，满屏判「过」（假绿）
+     if (!layer) { NSUInteger icw = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[2] : src.width, ich = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[3] : src.height;
+         float ky = s2a_widen_ky(); fit_geom(16.0 / 9.0 * s2a_widen_k() / (ky > 0 ? ky : 1) * ich, ich, icw, ich); }
+-    if (!layer) { if (g_grab_cb) grab_present(src, crop, crop && crop[2] > 0 && crop[3] > 0 ? CGSizeMake(round((double)crop[2] * src.height / crop[3]), src.height) : CGSizeMake(src.width, src.height), ticket); return 0; }
++    if (!layer) { if (g_grab_cb) grab_present(src, crop, crop && crop[2] > 0 && crop[3] > 0 ? CGSizeMake(round((double)crop[2] * src.height / crop[3]), src.height) : CGSizeMake(src.width, src.height), ticket); return nxb_present_offscreen(src, crop, period, ticket); }
+     if (!g_m3 && g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }   // the layer's residency set is macOS / iOS 26 on; Metal 3 presents through the command buffer
+ #if TARGET_OS_OSX
+     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
+diff --git a/graphics/nvn/gfx/nvn/pso_archive.h b/graphics/nvn/gfx/nvn/pso_archive.h
+index abddfd1e..6af35d4a 100644
+--- a/graphics/nvn/gfx/nvn/pso_archive.h
++++ b/graphics/nvn/gfx/nvn/pso_archive.h
+@@ -104,7 +104,10 @@ static int par_ga_lock(void) {
+ }
+ static void par_ga_unlock(int fd) { if (fd >= 0) flock(fd, LOCK_UN); }
+ static void par_ga_remove_new(NSSet<NSString *> *before) {
+-    NSMutableSet<NSString *> *made = [par_ga_list(0) mutableCopy]; [made minusSet:before];
++    // NXBridge: another application need not use S2Arm's lock. A newly created
++    // shared-directory entry is not proof that this host owns it. Clean only
++    // the application's bundle namespace; bare hosts leave shared files alone.
++    NSMutableSet<NSString *> *made = [par_ga_list(1) mutableCopy]; [made minusSet:before];
+     for (NSString *path in made) {
+         NSError *e = nil;
+         if ([NSFileManager.defaultManager removeItemAtPath:path error:&e]) atomic_fetch_add(&g_par_ga_removed, 1);
+diff --git a/platform/apple/cs/audio/AppleAudio.cs b/platform/apple/cs/audio/AppleAudio.cs
+index c8562ad3..a1b1b3d4 100644
+--- a/platform/apple/cs/audio/AppleAudio.cs
++++ b/platform/apple/cs/audio/AppleAudio.cs
+@@ -12,6 +12,9 @@ namespace S2A.Apple.Audio
+     {
+         public static IHardwareDeviceDriver Create()
+         {
++            if (Environment.GetEnvironmentVariable("NXB_MACH_MEDIA") == "1" ||
++                !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("NXB_PCM_PROBE")))
++                return new NXBridgeAudioDriver();
+             if (Environment.GetEnvironmentVariable("S2A_AUDIO_OFF") == "1")
+             {
+                 Console.Error.WriteLine("[S2A 声音] S2A_AUDIO_OFF=1：哑设备（能耗减法实验）");
+diff --git a/runtime/build.mk b/runtime/build.mk
+index 32c76765..a8fbc286 100644
+--- a/runtime/build.mk
++++ b/runtime/build.mk
+@@ -220,7 +220,7 @@ NVN_TEST_WIDEN := $(NVN_TEST_DIR)/widen/S2Arm.Gfx.Widen.dylib
+ $(BUILD)/tests/t_nvn_%: CFLAGS += -I$(abspath $(NVN_TEST_DIR)/nvn/gen)
+ # NVN 单测不链原生层 / 渲染器：libnvn 里弱引用的宿主符号在链接行一律放行（新单测照用这个变量，别逐行抄标志——10-25 t_nvn_a / t_nvn_event 两次漏 _s2a_autoplay_on 链接失败）
+ # Switch 2 视频解码接管（graphics/nvn/gfx/nvn/nvn2_codec.c，在 libnvn.a 里）用 VideoToolbox / CoreMedia / CoreVideo：系统框架，NVN 单测链 libnvn.a 时一起带上（同 graphics/build.mk HOST_LIBS）
+-NVN_TEST_WEAK := $(call S2A_WEAK_U,nvntest) -framework VideoToolbox -framework CoreMedia -framework CoreVideo
++NVN_TEST_WEAK := $(call S2A_WEAK_U,nvntest) -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface
+ $(NVN_TEST_DIR)/host/%.o: % runtime/src/native.h $(wildcard runtime/include/*.h) platform/plat.h platform/plat_asm.h graphics/track/s2a_track.h $(BUILD)/.host_cfg
+ 	@mkdir -p $(dir $@)
+ 	$(CC) $(CFLAGS) $(NATIVE_INC) -c $< -o $@
+diff --git a/runtime/src/lifecycle.c b/runtime/src/lifecycle.c
+index 7640a143..2c47d9f0 100644
+--- a/runtime/src/lifecycle.c
++++ b/runtime/src/lifecycle.c
+@@ -145,6 +145,7 @@ void s2a_host_shutdown(const char *why) {
+     S2A_SHUTDOWN_STAGE("停稳访存writer", t0);
+ #endif
+     s2a_cs_shutdown(why);
++    { void (*stop)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "nxb_video_probe_shutdown"); if (stop) stop(); }
+     S2A_SHUTDOWN_STAGE("托管服务与显卡关停", t0);
+ #if defined(__ANDROID__)
+     // void 回调返回不代表托管清理成功；只能接受同一 session 的真实 Stopped ack。

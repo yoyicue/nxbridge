@@ -45,6 +45,9 @@ static class Test
             Check(packets.Count == 1 && packets[0].Length == 480 && packets[0][0] == 12000 && packets[0][479] == 12000,
                   "queued renderer data must be copied and sent as 240 stereo frames");
             Check(session.GetPlayedSampleCount() == 240 && !session.WasBufferFullyConsumed(buffer), "half buffer is still owned");
+            var stats = driver.GetStatistics();
+            Check(stats.QueuedFrames == 240 && stats.PeakQueuedFrames == 480 && stats.UnderrunFrames == 0,
+                  "queue diagnostics use real submitted/consumed frames");
             session.Stop(); driver.Tick();
             Check(packets.Count == 1 && session.GetPlayedSampleCount() == 240, "pause preserves queued samples");
             session.Start(); session.SetVolume(.5f); driver.Volume = .5f; driver.Tick();
@@ -52,6 +55,8 @@ static class Test
             driver.Tick();
             Check(packets[2][0] == 0 && packets[2][479] == 0 && session.GetPlayedSampleCount() == 480,
                   "underrun emits silence without advancing guest completion");
+            Check(driver.GetStatistics().QueuedFrames == 0 && driver.GetStatistics().UnderrunFrames == 240,
+                  "diagnostics count missing frames without treating silence as consumed guest audio");
             Check(driver.GetUpdateRequiredEvent().WaitOne(0), "consumer wakes the audio renderer");
             session.Dispose(); driver.Tick();
             Check(packets.Count == 3, "disposed session must stop output");
@@ -82,9 +87,10 @@ static class Test
         using (var finished = new ManualResetEventSlim())
         {
             // A real renderer can outpace the consumer during shader compilation.
-            // Its 65th packet must wait, not crash, grow the queue or lose samples.
+            // 16 five-ms packets are 80 ms. Packet 17 must wait: the hard
+            // 64-descriptor capacity is not an acceptable steady latency target.
             var samples = new short[480];
-            for (int i = 1; i <= 64; i++)
+            for (int i = 1; i <= 16; i++)
             {
                 Array.Fill(samples, (short)i);
                 renderer.AppendBuffer(samples, 2);
@@ -92,7 +98,7 @@ static class Test
             Exception error = null;
             var producer = new Thread(() => {
                 entered.Set();
-                try { Array.Fill(samples, (short)65); renderer.AppendBuffer(samples, 2); }
+                try { Array.Fill(samples, (short)17); renderer.AppendBuffer(samples, 2); }
                 catch (Exception ex) { error = ex; }
                 finally { finished.Set(); }
             }) { IsBackground = true };
@@ -102,11 +108,28 @@ static class Test
             driver.Tick();
             Check(producer.Join(2000), "consumption must unblock the renderer");
             Check(!returnedEarly && error == null, "full active renderer queue must apply backpressure, not throw");
-            for (int i = 1; i < 65; i++) driver.Tick();
-            Check(packets.Count == 65, "bounded queue must eventually deliver every renderer packet");
-            for (int i = 0; i < 65; i++)
+            Check(driver.GetStatistics().PeakQueuedFrames <= 3840, "renderer queue lead must stay at most 80 ms");
+            for (int i = 1; i < 17; i++) driver.Tick();
+            Check(packets.Count == 17, "bounded queue must eventually deliver every renderer packet");
+            for (int i = 0; i < 17; i++)
                 Check(Array.TrueForAll(packets[i], sample => sample == i + 1),
                       "backpressure must preserve the exact PCM order through descriptor reuse");
+        }
+        packets.Clear();
+        using (var driver = new NXBridgeAudioDriver(pcm => packets.Add(pcm.ToArray()), false))
+        using (var session = Open(driver))
+        {
+            // A larger legitimate AudioOut packet can exceed the renderer lead
+            // target. It enters an empty queue intact and completes after every
+            // sample is consumed, not when it is admitted to the queue.
+            var large = Buffer(4800, 7); session.Start(); session.QueueBuffer(large);
+            for (int i = 0; i < 19; i++) driver.Tick();
+            Check(!session.WasBufferFullyConsumed(large) && session.GetPlayedSampleCount() == 4560,
+                  "large copied packet remains owned until its final sample");
+            driver.Tick();
+            Check(session.WasBufferFullyConsumed(large) && packets.Count == 20 &&
+                  packets.TrueForAll(p => Array.TrueForAll(p, x => x == 7)),
+                  "valid packet over the lead target must be delivered intact");
         }
         packets.Clear();
         using (var driver = new NXBridgeAudioDriver(pcm => packets.Add(pcm.ToArray()), false))
@@ -145,6 +168,8 @@ static class Test
                   "saturate overlaps and preserve the longer stream");
             Check(first.GetPlayedSampleCount() == 100 && second.GetPlayedSampleCount() == 240,
                   "each audio session has its own consumed frame count");
+            Check(driver.GetStatistics().UnderrunFrames == 0 && driver.GetStatistics().SessionUnderrunFrames == 140,
+                  "a partial/unused session is not an underrun when another session covers the mixed output");
             first.Dispose(); second.QueueBuffer(Buffer(240, -32768)); driver.Tick();
             Check(packets[1][0] == -32768, "closing one output must not stop another");
         }
@@ -202,6 +227,16 @@ static class Test
             Check(one == 1 && two == 0, "driver instances do not share audio");
             a.Dispose(); a.Dispose(); a.Tick();
             Check(one == 1, "dispose is idempotent and stops callbacks");
+        }
+        using (var driver = new NXBridgeAudioDriver(_ => {}, false))
+        using (var session = Open(driver))
+        {
+            var reusable = Buffer(240, 9); session.Start();
+            for (int i = 0; i < 100; i++) { session.QueueBuffer(reusable); driver.Tick(); }
+            long allocated = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 2000; i++) { session.QueueBuffer(reusable); driver.Tick(); }
+            allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+            Check(allocated == 0, "steady audio enqueue/mix/diagnostics must not allocate per packet: " + allocated);
         }
         long firstTime = 0, lastTime = 0; int callbacks = 0;
         using (var ready = new ManualResetEventSlim())
