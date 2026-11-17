@@ -69,29 +69,73 @@
     }
   ],
   "latest_audit": {
-    "checked_at": "2026-11-13",
+    "checked_at": "2026-11-18",
+    "checked_at_local": "2026-11-18 00:39 Asia/Shanghai",
     "status": "read_only_observations_not_runtime_locks",
     "components": {
+      "s2arm": {
+        "reference": "main",
+        "revision": "75852d41e1cc2f78a7c61195dcf4bb6d4543fd5d",
+        "result": "Upstream enables the existing Metal 4 encoding thread by default on Mac; no NXBridge comparison or upgrade performed."
+      },
       "nxnative": {
         "reference": "main",
-        "revision": "8d44aaf8f3a59eb0e0f63ced14b3f7f26e903484",
-        "result": "Original adapter patches do not apply; a new isolated adapter patch replays and C audio/input/lifecycle syntax checks pass. Metal build blocked by the local SDK; no production engine installed."
+        "revision": "fb18e83acd443aa2e7d94652538c021129696632",
+        "result": "New input motion and pipeline changes are candidates only; no NXBridge build or runtime verification."
       },
       "nx2apple": {
-        "reference": "v1.4.0",
-        "revision": "97ba00eb64e60037e173856197dce291b38bb3b3",
-        "result": "Release reports updated engine and removal of its .NET dependency; NXBridge compatibility unverified."
+        "reference": "main / v1.5.0-rc6 prerelease",
+        "revision": "7541e9e2f15b8beda26ff5d7b405e234e4015ed2",
+        "result": "RC6 pins nxnative 94a0944755da1a443f42651bf7ee49ab24ed5ee5 plus NX2Apple patches; not a direct upgrade."
       },
       "sunshine": {
         "reference": "master",
-        "revision": "f1868133b2308a1486624fc9d561b9e58cdf8cb4",
-        "result": "New preview supports macOS gamepads via a licensed signed virtual HID broker; per-session isolation unvalidated."
+        "revision": "63d6d05259ad738243584e0cdd044966e0ffdd1e",
+        "result": "Native VideoToolbox v2 and output resolution cap merit comparison; no runtime integration."
       },
       "moonshine": {
         "reference": "main",
-        "revision": "7e214670e855f6faa6e01f02b849c27adb4a9161",
-        "result": "Selected RTSP request and video negotiation guards adapted to rgsp-cast-derived core; loopback and one isolated 1402 Moonlight readback passed. Not a wholesale dependency upgrade or daily deployment."
+        "revision": "0ab6adce0e9312f3e77c5cf9ab51f69af40e63fc",
+        "result": "v0.17.2 and subsequent changes include per-connection TLS handshake timeout; fork compatibility not assessed."
+      },
+      "moonlight-android": {
+        "reference": "master",
+        "revision": "b48494cb96bff23d8886c4775cc4f39a1075495d",
+        "result": "No upstream HEAD change relative to the fixed NXBridge client base."
+      },
+      "rgsp-cast": {
+        "reference": "main",
+        "revision": "2eeb0fa63221a9e72dfc51ea77a01a3be8ff0e1e",
+        "result": "No HEAD change relative to the vendored protocol source; NXBridge maintains additional local patches."
       }
     }
-  }
+  },
+  "audit_history": [
+    {
+      "checked_at": "2026-11-13",
+      "status": "read_only_observations_not_runtime_locks",
+      "components": {
+        "nxnative": {
+          "reference": "main",
+          "revision": "8d44aaf8f3a59eb0e0f63ced14b3f7f26e903484",
+          "result": "Original adapter patches do not apply; a new isolated adapter patch replays and C audio/input/lifecycle syntax checks pass. Metal build blocked by the local SDK; no production engine installed."
+        },
+        "nx2apple": {
+          "reference": "v1.4.0",
+          "revision": "97ba00eb64e60037e173856197dce291b38bb3b3",
+          "result": "Release reports updated engine and removal of its .NET dependency; NXBridge compatibility unverified."
+        },
+        "sunshine": {
+          "reference": "master",
+          "revision": "f1868133b2308a1486624fc9d561b9e58cdf8cb4",
+          "result": "New preview supports macOS gamepads via a licensed signed virtual HID broker; per-session isolation unvalidated."
+        },
+        "moonshine": {
+          "reference": "main",
+          "revision": "7e214670e855f6faa6e01f02b849c27adb4a9161",
+          "result": "Selected RTSP request and video negotiation guards adapted to rgsp-cast-derived core; loopback and one isolated 1402 Moonlight readback passed. Not a wholesale dependency upgrade or daily deployment."
+        }
+      }
+    }
+  ]
 }

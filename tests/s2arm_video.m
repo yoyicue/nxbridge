@@ -21,8 +21,11 @@ void nvn_be_present_wait(uint64_t ticket);
 void nvn_be_drain(void);
 
 int main(int argc, char **argv) {
-    assert(argc == 2 || (argc == 3 && !strcmp(argv[2], "--pressure")));
-    int pressure = argc == 3;
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "--pressure") || !strcmp(argv[2], "--crop"))));
+    int pressure = argc == 3 && !strcmp(argv[2], "--pressure");
+    int cropped = argc == 3 && !strcmp(argv[2], "--crop");
+    const int crop[4] = {0, 0, 80, 45};
+    const int *region = cropped ? crop : NULL;
     @autoreleasepool {
         assert(g_layer == nil);
         setenv("NXB_VIDEO_PROBE", argv[1], 1);
@@ -37,20 +40,23 @@ int main(int argc, char **argv) {
         desc.storageMode = MTLStorageModeShared;
         id<MTLTexture> texture = [device newTextureWithDescriptor:desc]; assert(texture);
         uint32_t pixels[160 * 90];
-        for (int i = 0; i < 160 * 90; i++) pixels[i] = 0xff3366cc;
+        for (int y = 0; y < 90; y++) {
+            for (int x = 0; x < 160; x++)
+                pixels[y * 160 + x] = !cropped || (x < 80 && y < 45) ? 0xff3366cc : 0xff000000;
+        }
         [texture replaceRegion:MTLRegionMake2D(0, 0, 160, 90) mipmapLevel:0 withBytes:pixels bytesPerRow:160 * 4];
         uint64_t serial = mtl_ext_tex((__bridge void *)texture);
         id<MTLSharedEvent> event = [device newSharedEvent];
         // Warm the presentation pipeline and allow the one-slot local encoder
         // to release its first lease before checking the queue dependency.
         event.signaledValue = 1;
-        nvn_be_present_wait(mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 1, NULL));
+        nvn_be_present_wait(mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 1, region));
         usleep(250000);
         uint64_t start = clock_gettime_nsec_np(CLOCK_MONOTONIC);
-        uint64_t ticket = mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 2, NULL);
+        uint64_t ticket = mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 2, region);
         // Local capture has one GPU slot. A later dropped frame must not move
         // the source-release watermark past this still-pending GPU copy.
-        if (pressure) ticket = mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 2, NULL);
+        if (pressure) ticket = mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 2, region);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
                        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ event.signaledValue = 2; });
         nvn_be_present_wait(ticket);
@@ -66,7 +72,7 @@ int main(int argc, char **argv) {
         }
         for (int frame = 0; frame < 12; frame++) {
             usleep(100000);
-            nvn_be_present_wait(mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 2, NULL));
+            nvn_be_present_wait(mtl_present_ext(serial, 1.0 / 30, (__bridge void *)event, 2, region));
         }
         nvn_be_drain();
         nxb_video_probe_shutdown();

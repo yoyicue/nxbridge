@@ -98,6 +98,13 @@ def plan(engine, game, save, work, inherited):
         'S2A_AUTOPLAY_OUT': str(run), 'S2A_RUN_ROOT': str(run / 'runtime'),
         'S2A_MACRO_DUMP': str(run / 'macro'),
     })
+    # Preserve the engine's platform default unless the catalog explicitly
+    # selects a mode for this game. Other upstream renderer knobs stay filtered.
+    if 'DM_NVN_ENC_THREAD' in inherited:
+        mode = inherited['DM_NVN_ENC_THREAD']
+        if mode not in ('0', '1'):
+            raise ValueError('DM_NVN_ENC_THREAD must be 0 or 1')
+        env['DM_NVN_ENC_THREAD'] = mode
     # These measured, game-specific warmups are opt-in and must match the
     # tracked game identity. A game update automatically falls back to the
     # upstream first-use path instead of inheriting another build's settings.

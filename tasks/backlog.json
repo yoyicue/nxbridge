@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-13",
+  "updated_at": "2026-11-18",
   "execution_policy": "single_active_agent_by_default",
   "tasks": [
     {
@@ -1542,7 +1542,8 @@
       ],
       "evidence": [
         "docs/reports/NXB-128.md",
-        "docs/reports/NXB-129.md"
+        "docs/reports/NXB-129.md",
+        "docs/reports/NXB-129-encoding-thread.md"
       ],
       "blockers": []
     },
@@ -1753,6 +1754,55 @@
       ],
       "evidence": [
         "docs/reports/NXB-137.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-140",
+      "title": "核对上游最新修订与候选改动",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-032"
+      ],
+      "scope": [
+        "config/upstreams.json",
+        "docs/",
+        "tasks/backlog.json"
+      ],
+      "acceptance": [
+        "核对各上游默认分支最新修订与发布标记，区分运行时锁和只读快照",
+        "筛选对性能、体感和媒体相关的候选并说明验证边界",
+        "记录主来源、检查时间及下一步，运行项目检查"
+      ],
+      "evidence": [
+        "docs/reports/NXB-140.md"
+      ],
+      "blockers": []
+    },
+    {
+      "id": "NXB-141",
+      "title": "适配 S2Arm 75852d4 的离屏呈现和内部管线预热",
+      "priority": "P1",
+      "status": "done",
+      "owner": "codex",
+      "depends_on": [
+        "NXB-140"
+      ],
+      "scope": [
+        "adapters/s2arm/",
+        "config/s2arm-experiment-lock.json",
+        "tests/",
+        "docs/"
+      ],
+      "acceptance": [
+        "以完整修订准备和构建独立候选，保留日常运行锁",
+        "验证 Metal 3 和 4 离屏帧的生产者事件、帧槽耗尽、完成和释放",
+        "验证纹理拷贝和上游张量核预热，使用隔离 OoT 存档验证读档和音画"
+      ],
+      "evidence": [
+        "docs/reports/NXB-141.md"
       ],
       "blockers": []
     }

@@ -75,6 +75,16 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(actual['DM_NXB_COPY_PREWARM'], '0')
         self.assertEqual(actual['DM_NXB_TENSOR_PREWARM'], '0')
 
+    def test_metal_encoding_thread_override(self):
+        self.assertNotIn('DM_NVN_ENC_THREAD', self.plan()[-1])
+        for mode in ('0', '1'):
+            env = {**self.env, 'DM_NVN_ENC_THREAD': mode, 'DM_NVN_CUT': '64'}
+            actual = self.plan(env)[-1]
+            self.assertEqual(actual['DM_NVN_ENC_THREAD'], mode)
+            self.assertNotIn('DM_NVN_CUT', actual)
+        with self.assertRaisesRegex(ValueError, 'DM_NVN_ENC_THREAD'):
+            self.plan({**self.env, 'DM_NVN_ENC_THREAD': '01'})
+
     def test_private_paths_and_input_identity(self):
         env = {**self.env, 'S2A_SAVE_DIR': '/another-player', 'S2A_AUTOPLAY': '1',
                'NXGAL_SHADER_CACHE_DIR': '/shared', 'DM_CHEATS': '1', 'DM_WINDOW': '1',

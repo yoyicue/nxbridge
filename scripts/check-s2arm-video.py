@@ -65,22 +65,29 @@ def main():
     # No inherited Mach ports, probe paths, game profiles or rendering overrides.
     clean = {key: value for key, value in os.environ.items()
              if not key.startswith(('NXB_', 'NXBRIDGE_', 'DM_', 'S2A_', 'NXGAL_', 'S2ARM_'))}
-    for backend, pressure in (('mtl4', False), ('mtl3', False), ('mtl4', True), ('mtl3', True)):
-        name = backend + ('-pressure' if pressure else '')
-        folder = output / name; folder.mkdir()
-        env = dict(clean)
-        if backend == 'mtl3': env['NXGAL_BE'] = 'mtl3'
-        with (folder / 'run.log').open('w') as log:
-            subprocess.run([str(executable), str(folder / 'out.h264')] + (['--pressure'] if pressure else []), env=env, cwd=folder,
-                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20)
-        log = (folder / 'run.log').read_text()
-        required = ['direct backend: Metal ' + ('4' if backend == 'mtl4' else '3'),
-                    f'claims=14 encoded=14 dropped={int(pressure)} failed=0 inflight=0', 'PASS: headless S2Arm']
-        if not all(value in log for value in required):
-            raise ValueError(f'{name} did not report the expected backend and successful encoder drain')
-        (folder / 'decoded.json').write_text(json.dumps(decode(folder / 'out.h264'), indent=2) + '\n')
-        print(f'{name}: 14 frames encoded and decoded; {int(pressure)} deliberate drop; producer-event dependency checked')
+    for backend in ('mtl4', 'mtl3'):
+        for case in ('default', 'pressure', 'crop'):
+            check_case(output, executable, clean, backend, case)
     print('Synthetic path only; game compatibility and game FPS are untested.')
+
+
+def check_case(output, executable, clean, backend, case):
+    name = backend if case == 'default' else f'{backend}-{case}'
+    folder = output / name; folder.mkdir()
+    env = dict(clean)
+    if backend == 'mtl3': env['NXGAL_BE'] = 'mtl3'
+    with (folder / 'run.log').open('w') as log:
+        options = [] if case == 'default' else ['--' + case]
+        subprocess.run([str(executable), str(folder / 'out.h264'), *options], env=env, cwd=folder,
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20)
+    log = (folder / 'run.log').read_text()
+    drops = int(case == 'pressure')
+    required = ['direct backend: Metal ' + ('4' if backend == 'mtl4' else '3'),
+                f'claims=14 encoded=14 dropped={drops} failed=0 inflight=0', 'PASS: headless S2Arm']
+    if not all(value in log for value in required):
+        raise ValueError(f'{name} did not report the expected backend and successful encoder drain')
+    (folder / 'decoded.json').write_text(json.dumps(decode(folder / 'out.h264'), indent=2) + '\n')
+    print(f'{name}: 14 frames encoded and decoded; {drops} deliberate drop; producer-event dependency checked')
 
 
 if __name__ == '__main__':

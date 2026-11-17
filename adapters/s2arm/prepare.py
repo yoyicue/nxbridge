@@ -49,14 +49,14 @@ def adapter_bytes(source):
     return data
 
 
-def manifest(root, revision, patch):
+def manifest(root, revision, patch, prewarm_patch):
     paths = [target for _, target in FILES]
     paths += git(root, 'diff', '--name-only', capture=True).stdout.splitlines()
     return {
         'schema_version': 1,
         'upstream_revision': revision,
         'patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(),
-        'internal_prewarm_patch_sha256': hashlib.sha256((HERE / 'prewarm-internal-pipelines.patch').read_bytes()).hexdigest(),
+        'internal_prewarm_patch_sha256': hashlib.sha256(prewarm_patch.read_bytes()).hexdigest(),
         'files': {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sorted(set(paths))},
     }
 
@@ -79,9 +79,10 @@ def prepare(source, output, revision=PIN):
     patch = HERE / PATCHES[revision]
     if not patch.is_file():
         raise ValueError('missing integration.patch')
-    prewarm_patch = HERE / 'prewarm-internal-pipelines.patch'
+    prewarm_patches = LOCKED.get('internal_prewarm_patches', {})
+    prewarm_patch = HERE / prewarm_patches.get(revision, 'prewarm-internal-pipelines.patch')
     if not prewarm_patch.is_file():
-        raise ValueError('missing prewarm-internal-pipelines.patch')
+        raise ValueError(f'missing {prewarm_patch.name}')
     subprocess.run(['git', 'clone', '--no-hardlinks', '--no-checkout', str(source), str(output)], check=True)
     git(output, 'checkout', '--detach', revision)
     git(output, 'apply', '--check', str(patch))
@@ -95,7 +96,8 @@ def prepare(source, output, revision=PIN):
     git(output, 'apply', str(patch))
     git(output, 'apply', '--check', str(prewarm_patch))
     git(output, 'apply', str(prewarm_patch))
-    (output / '.nxbridge-s2arm.json').write_text(json.dumps(manifest(output, revision, patch), indent=2) + '\n')
+    (output / '.nxbridge-s2arm.json').write_text(
+        json.dumps(manifest(output, revision, patch, prewarm_patch), indent=2) + '\n')
     return output
 
 

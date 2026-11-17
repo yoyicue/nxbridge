@@ -1,0 +1,77 @@
+diff --git a/graphics/nvn/gfx/nvn/nvn_mtl.m b/graphics/nvn/gfx/nvn/nvn_mtl.m
+index 3cd35f6..e365e06 100644
+--- a/graphics/nvn/gfx/nvn/nvn_mtl.m
++++ b/graphics/nvn/gfx/nvn/nvn_mtl.m
+@@ -104,6 +104,7 @@ static int grow_(void **p, size_t n, const char *what) {
+ #define GROW(ptr, nbytes, what) grow_((void **)&(ptr), (size_t)(nbytes), what)
+ 
+ static void warm_start(void), warm_announce(void);
++static void nxb_copy_prepare(void);
+ static void warm_claim(void);
+ static void warm_bump(const char *vk, const char *fk);   // 游戏登记着色器程序时把预热清单里这对着色器的管线提到队头（warm_pick）
+ 
+@@ -10410,6 +10411,8 @@ static void warm_announce(void) {
+ }
+ static void warm_start(void) {
+     if (g_warm_started++) return;
++    const char *copy = getenv("DM_NXB_COPY_PREWARM");
++    if (copy && !strcmp(copy, "1") && prepare_on()) nxb_copy_prepare();
+     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ pso_user_seen_load(); });   // the record's dedupe set, off the submit thread (pso_user_seen_load)
+     NSArray<NSString *> *paths = warm_paths(1);
+     if (!paths) return;
+@@ -16085,7 +16088,7 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
+         default: return 0;
+     }
+ }
+-static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
++static int nxb_copy_t2t(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror, bool prepare_only) {
+     static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+     g_t2t_draw_why = NULL;   // D-HT4P 取证：画不了时记哪一条（copy_t2t_ 的「没实现」红行带上）
+     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) { g_t2t_draw_why = failed ? "管线没建起来" : "区域为空"; return 0; }
+@@ -16115,7 +16118,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
+         at = rec_table(tab_new(1, 2, 1, &e));
+         for (int i = 0; i < 2; i++) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = i ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+             sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; sd.supportArgumentBuffers = YES; samp[i] = [g_dev newSamplerStateWithDescriptor:sd]; }
+-        if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("【红】 cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
++        if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { if (!prepare_only) failed = 1; MLOG("【红】 cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
+         pso = [NSMutableDictionary dictionary];
+     }
+     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
+@@ -16130,6 +16133,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
+         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
+         pso[pk] = ps;
+     }
++    if (prepare_only) return 1;
+     unsigned sw = MAX(s.width >> sl, 1ul), sh = MAX(s.height >> sl, 1ul), dw = MAX(d.width >> dl, 1ul), dh = MAX(d.height >> dl, 1ul);
+     if ((unsigned)(dr->xoffset + dr->width) > dw || (unsigned)(dr->yoffset + dr->height) > dh) { g_t2t_draw_why = "目标区域超出目标存储"; return 0; }
+     int nz = sr->depth ? sr->depth : 1;
+@@ -16162,6 +16166,29 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
+                                                     linear && !depth ? " (bilinear)" : "", stencil ? (scopy ? " (depth + stencil)" : " (no stencil view possible, cleared to 0)") : ""); }
+     return 1;
+ }
++
++static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
++    return nxb_copy_t2t(s, d, sl, ss, dl, ds, sr, dr, linear, mirror, false);
++}
++
++// Prepare the observed colour-copy format on the submit thread. The
++// preparation path uses only the format and stops before encoding a copy.
++static void nxb_copy_prepare(void) {
++    @autoreleasepool {
++        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG11B10Float width:1 height:1 mipmapped:NO];
++        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++        id<MTLTexture> texture = [g_dev newTextureWithDescriptor:desc];
++        if (!texture) {
++            MLOG("[nxb-copy-prepare] texture allocation failed; normal first use retained");
++            return;
++        }
++        NVNcopyRegion region = {0, 0, 0, 1, 1, 1};
++        uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++        int ready = nxb_copy_t2t(texture, texture, 0, 0, 0, 0, &region, &region, 1, 0, true);
++        MLOG("[nxb-copy-prepare] format=RG11B10Float ready=%d elapsed_ms=%.3f (pipeline only; no GPU copy)",
++             ready, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6);
++    }
++}
+ // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
+ // S2Arm widen: copies between render targets whose storage tex_widen widened. A copy of the whole game width from one widened storage into another takes the whole widened width
+ //   (the widened strips go with the picture, as every full-screen pass that draws it does); others stay in game coordinates, the left part, counted on the first ones (a widened

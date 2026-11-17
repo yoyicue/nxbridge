@@ -14,8 +14,12 @@
     "The d5435c3 revision is used by the 1402 and 1372 OoT entries after bounded isolated smoke tests; stutter / audio continuity are not yet accepted."
   ],
   "candidate_revisions": {
+    "75852d41e1cc2f78a7c61195dcf4bb6d4543fd5d": "integration-75852d4.patch",
     "069b1875dc9981b2b4ed7929d6b0052f4d10184f": "integration-069b187.patch",
     "93bf8c6cab24934b3fe05af4bc04cba1fec84328": "integration.patch"
+  },
+  "internal_prewarm_patches": {
+    "75852d41e1cc2f78a7c61195dcf4bb6d4543fd5d": "prewarm-75852d4.patch"
   },
   "patch": "integration-d5435c3.patch"
 }

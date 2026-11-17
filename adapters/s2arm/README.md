@@ -19,7 +19,7 @@ NXBridge 对 S2Arm 的独立接入，用于逐款验证 NS2 游戏。固定修�
 python3 adapters/s2arm/prepare.py --source "$S2A_SOURCE" --output "$S2A_ENGINE"
 ```
 
-实验锁默认固定 `d5435c3cf2a4bbdd0e36ed3cf21440ee714efa0b`，并保留 `069b1875dc9981b2b4ed7929d6b0052f4d10184f` 和 `93bf8c6cab24934b3fe05af4bc04cba1fec84328` 的独立补丁；指定 `--revision` 和相应完整修订可准备旧版本。`d5435c3` 已切换到 1402 和 1372 的 OoT 入口；OoT 仍有长帧和音频间断，见 [NXB-137](../../docs/reports/NXB-137.md)。新版本沿用上游按队列去除重叠 GPU 时间的处理，并对不可信反馈沿用宿主时间上界安全保护。
+实验锁默认固定 `d5435c3cf2a4bbdd0e36ed3cf21440ee714efa0b`，供 1402 和 1372 的日常 OoT 入口使用。用 `--revision 75852d41e1cc2f78a7c61195dcf4bb6d4543fd5d` 可准备通过离屏呈现和预热短测的候选。实验锁也保留 `069b187` 和 `93bf8c6` 的旧版补丁。候选沿用上游按队列去除重叠 GPU 时间的处理，并对不可信反馈应用宿主时间上界保护。[候选验证](../../docs/reports/NXB-141.md) · [日常入口](../../docs/reports/NXB-137.md)
 
 需要 Apple Silicon、匹配的 Xcode / Metal 工具、Bash 5、上游 `global.json` 指定的 .NET SDK，以及上游构建依赖。此次在 M4 / macOS 26.5 / Xcode 26.5 上使用 .NET SDK 10.0.403 完成构建；Bash 5、Meson、Ninja 与 Python 依赖须先准备，脚本不代装。游戏着色器转换还要求 `spirv-cross` 与上游 `translator/dmsh_chain.lock` 一致，此固定修订为 `1.4.363.0`；缺失时在直连库工具校验处失败，补齐后可以沿用原输出目录续跑。
 
@@ -34,7 +34,9 @@ env DOTNET="$S2A_DOTNET" DOTNET_ROOT="$S2A_DOTNET_ROOT" \
 
 游戏准备沿用固定版本的 [上游 macOS 构建入口](https://github.com/jhaizhou-ops/S2Arm/blob/d5435c3cf2a4bbdd0e36ed3cf21440ee714efa0b/pack/oneclick/oneclick.sh)，选择 `--target mac`。具体源包格式、标题 / 版本、系统数据及转换结果必须按实际文件核实；本目录不提供或下载游戏、密钥、存档。
 
-固定引擎的适配构建还包含两项默认关闭的内部管线预热：缩放纹理拷贝与超分替代路径的平方计算核。逐游戏配置可以分别设置 `DM_NXB_COPY_PREWARM=1` 和 `DM_NXB_TENSOR_PREWARM=1`，同时须设置 `DM_NXB_PREWARM_GAME_SHA256` 为 `s2arm_cache.game_key` 对该游戏身份中已跟踪输入的摘要；缺失、格式错误或游戏输入不匹配时启动器关闭这两项并记录回退，游戏仍使用原先的首次创建路径。该身份覆盖可执行模块、元数据和已跟踪的着色器索引，不是全量 ROM 内容校验。两项预热只准备管线，不执行 GPU 绘制；OoT 的实测和限制见 [NXB-129](../../docs/reports/NXB-129.md)。
+缩放纹理拷贝的预热由逐游戏配置 `DM_NXB_COPY_PREWARM=1` 启用，同时须设置 `DM_NXB_PREWARM_GAME_SHA256` 为 `s2arm_cache.game_key` 对该游戏已跟踪输入的摘要。摘要覆盖可执行模块、元数据和已跟踪的着色器索引。身份无效时启动器关闭该选项并记录回退，游戏在首次使用时创建管线。旧版的平方计算核预热由同样绑定游戏身份的 `DM_NXB_TENSOR_PREWARM=1` 控制。`75852d4` 的平方及 sRGB 解码计算管线由上游在 Switch 2 图形初始化时后台构建，条件是超分替代路径启用。[旧版实测](../../docs/reports/NXB-129.md) · [候选验证](../../docs/reports/NXB-141.md)
+
+源码中的启动器支持在单个游戏的 `environment` 里设置 `DM_NVN_ENC_THREAD`。字符串 `"1"` 开启独立 Metal 图形指令编码线程，`"0"` 关闭，省略时沿用引擎默认值。其他值会在创建会话前报错。该选项影响 S2Arm 向 GPU 提交指令的方式，串流视频继续由 VideoToolbox 编码。已准备的运行时使用各自清单中的启动器。实验数据见 [OoT 图形线程对照](../../docs/reports/NXB-129-encoding-thread.md)。
 
 游戏转换还需要 C 改写器的源码依赖，不能用已安装的 Python wheel 代替。首次构建时，在独立 Python 环境安装上游 `launchers/macos/requirements-runtime.txt` 与 `pack/fonts/requirements.txt` 的固定依赖，并显式准备 C 依赖：
 
@@ -75,7 +77,7 @@ make check-native-media
 make check
 ```
 
-视频检查需要已编译引擎、Metal 4 设备、FFmpeg / ffprobe，输出目录必须尚不存在；分别测试默认 Metal 4 和强制 Metal 3，以及两者的帧槽耗尽场景。它验证生产者事件完成前不释放源纹理、丢弃后续帧不会提前推进完成栅栏、硬件 H.264 生成及解码像素；不是 FPS 基准。音频测试直接引用固定版本的 Ryujinx 音频接口，首次构建需提前具备上游依赖。
+视频检查需要已编译引擎、Metal 4 设备、FFmpeg / ffprobe，输出目录必须尚不存在。默认 Metal 4 和强制 Metal 3 分别验证生产者事件、帧槽耗尽、源纹理释放顺序、裁切后的硬件 H.264 和解码像素。音频测试直接引用固定版本的 Ryujinx 音频接口，首次构建需提前具备上游依赖。
 
 ## 边界与来源
 
